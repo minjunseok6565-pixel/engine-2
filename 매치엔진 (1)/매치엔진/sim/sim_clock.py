@@ -35,11 +35,13 @@ def simulate_inbound(
     def_scale = float(inbound_rules.get("def_scale", 0.00035))
     off_scale = float(inbound_rules.get("off_scale", 0.00030))
 
-    if not offense.lineup or not defense.lineup:
+    if not offense.on_court_players() or not defense.on_court_players():
         return False
 
-    inbounder = max(offense.lineup, key=lambda p: p.get("PASS_SAFE"))
-    def_steal = sum(p.get("DEF_STEAL") for p in defense.lineup) / max(len(defense.lineup), 1)
+    offense_players = offense.on_court_players()
+    defense_players = defense.on_court_players()
+    inbounder = max(offense_players, key=lambda p: p.get("PASS_SAFE"))
+    def_steal = sum(p.get("DEF_STEAL") for p in defense_players) / max(len(defense_players), 1)
     off_safe = inbounder.get("PASS_SAFE")
 
     # Scale around 50 as "league average"
@@ -67,11 +69,12 @@ def _pick_shot_clock_tov_pid(offense: TeamState) -> str:
         pid = getattr(offense, 'roles', {}).get(role) if hasattr(offense, 'roles') else None
         if isinstance(pid, str) and pid:
             # ensure on-court
-            if any(getattr(p, 'pid', None) == pid for p in (offense.lineup or [])):
+            if any(getattr(p, 'pid', None) == pid for p in offense.on_court_players()):
                 return pid
     # Fallback: best passer on the floor
-    if offense.lineup:
-        return max(offense.lineup, key=lambda p: p.get('PASS_CREATE')).pid
+    offense_players = offense.on_court_players()
+    if offense_players:
+        return max(offense_players, key=lambda p: p.get('PASS_CREATE')).pid
     return ''
 
 def commit_shot_clock_turnover(offense: TeamState) -> None:

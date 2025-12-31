@@ -283,7 +283,8 @@ def simulate_game(
         targets_sec_home=targets_home,
         targets_sec_away=targets_away,
     )
-    orig_lineups = {teamA.name: list(teamA.lineup), teamB.name: list(teamB.lineup)}
+    teamA.set_on_court(start_home)
+    teamB.set_on_court(start_away)
 
     regulation_quarters = int(rules.get("quarters", 4))
     overtime_length = float(rules.get("overtime_length", 300))
@@ -319,95 +320,82 @@ def simulate_game(
             off_on_court = _get_on_court(game_state, offense, teamA)
             def_on_court = _get_on_court(game_state, defense, teamA)
 
-            # Temporarily set team.lineup to the 5 on-court players for possession-level logic.
-            # Always restore to the full roster lineup, even if an exception occurs.
-            try:
-                # Build on-court lineups (avoid calling find_player(pid) twice).
-                offense.lineup = []
-                for pid in off_on_court:
-                    p = offense.find_player(pid)
-                    if p:
-                        offense.lineup.append(p)
-                defense.lineup = []
-                for pid in def_on_court:
-                    p = defense.find_player(pid)
-                    if p:
-                        defense.lineup.append(p)
+            offense.set_on_court(off_on_court)
+            defense.set_on_court(def_on_court)
+            off_on_court = list(offense.on_court_pids)
+            def_on_court = list(defense.on_court_pids)
 
-                for p in offense.lineup:
-                    p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
-                for p in defense.lineup:
-                    p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
+            off_players = offense.on_court_players()
+            def_players = defense.on_court_players()
 
-                avg_off_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
-                avg_def_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
-                def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
+            for p in off_players:
+                p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
+            for p in def_players:
+                p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
 
-                score_diff = teamA.pts - teamB.pts
-                is_clutch = game_state.quarter >= regulation_quarters and game_state.clock_sec <= 120 and abs(score_diff) <= 8
-                is_garbage = game_state.quarter == regulation_quarters and game_state.clock_sec <= 360 and abs(score_diff) >= 20
-                variance_mult = 0.80 if is_clutch else 1.25 if is_garbage else 1.0
-                tempo_mult = (1.0 / 1.08) if is_garbage else 1.0
+            avg_off_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
+            avg_def_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
+            def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
 
-                bonus_threshold = (
-                    int(rules.get("overtime_bonus_threshold", rules.get("bonus_threshold", 5)))
-                    if game_state.quarter > regulation_quarters
-                    else int(rules.get("bonus_threshold", 5))
-                )
+            score_diff = teamA.pts - teamB.pts
+            is_clutch = game_state.quarter >= regulation_quarters and game_state.clock_sec <= 120 and abs(score_diff) <= 8
+            is_garbage = game_state.quarter == regulation_quarters and game_state.clock_sec <= 360 and abs(score_diff) >= 20
+            variance_mult = 0.80 if is_clutch else 1.25 if is_garbage else 1.0
+            tempo_mult = (1.0 / 1.08) if is_garbage else 1.0
 
-                ctx = {
-                    "score_diff": score_diff,
-                    "is_clutch": is_clutch,
-                    "is_garbage": is_garbage,
-                    "variance_mult": variance_mult,
-                    "tempo_mult": tempo_mult,
-                    "avg_fatigue_off": avg_off_fatigue,
-                    "fatigue_bad_mult_max": float(rules.get("fatigue_effects", {}).get("bad_mult_max", 1.12)),
-                    "fatigue_bad_critical": float(rules.get("fatigue_effects", {}).get("bad_critical", 0.25)),
-                    "fatigue_bad_bonus": float(rules.get("fatigue_effects", {}).get("bad_bonus", 0.08)),
-                    "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
-                    "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
-                    "def_eff_mult": def_eff_mult,
-                    "fatigue_map": game_state.fatigue,
-                    "def_on_court": def_on_court,
-                    "off_on_court": off_on_court,
-                    "team_fouls": game_state.team_fouls,
-                    "player_fouls": game_state.player_fouls,
-                    "foul_out": int(rules.get("foul_out", 6)),
-                    "bonus_threshold": bonus_threshold,
-                    "pos_start": pos_start,
-                    "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead"),
-                }
+            bonus_threshold = (
+                int(rules.get("overtime_bonus_threshold", rules.get("bonus_threshold", 5)))
+                if game_state.quarter > regulation_quarters
+                else int(rules.get("bonus_threshold", 5))
+            )
 
-                # Setup time: dead-ball only (game clock runs; shot clock should start at full)
-                setup_map = {
-                    "start_q": "setup_start_q",
-                    "after_score": "setup_after_score",
-                    "after_drb": "setup_after_drb",
-                    "after_tov": "setup_after_tov",
-                    "after_tov_dead": "setup_after_tov",
-                }
-                setup_key = setup_map.get(pos_start, "possession_setup")
-                setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
-                if setup_cost > 0:
-                    apply_dead_ball_cost(game_state, setup_cost, tempo_mult)
-                    if game_state.clock_sec <= 0:
-                        # account minutes for the setup time
-                        elapsed = max(start_clock - game_state.clock_sec, 0.0)
-                        _update_minutes(game_state, off_on_court, elapsed)
-                        _update_minutes(game_state, def_on_court, elapsed)
-                        game_state.clock_sec = 0
-                        offense.lineup = list(orig_lineups[offense.name])
-                        defense.lineup = list(orig_lineups[defense.name])
-                        break
+            ctx = {
+                "score_diff": score_diff,
+                "is_clutch": is_clutch,
+                "is_garbage": is_garbage,
+                "variance_mult": variance_mult,
+                "tempo_mult": tempo_mult,
+                "avg_fatigue_off": avg_off_fatigue,
+                "fatigue_bad_mult_max": float(rules.get("fatigue_effects", {}).get("bad_mult_max", 1.12)),
+                "fatigue_bad_critical": float(rules.get("fatigue_effects", {}).get("bad_critical", 0.25)),
+                "fatigue_bad_bonus": float(rules.get("fatigue_effects", {}).get("bad_bonus", 0.08)),
+                "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
+                "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
+                "def_eff_mult": def_eff_mult,
+                "fatigue_map": game_state.fatigue,
+                "def_on_court": def_on_court,
+                "off_on_court": off_on_court,
+                "team_fouls": game_state.team_fouls,
+                "player_fouls": game_state.player_fouls,
+                "foul_out": int(rules.get("foul_out", 6)),
+                "bonus_threshold": bonus_threshold,
+                "pos_start": pos_start,
+                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead"),
+            }
 
-                # full shot clock starts after setup
-                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
-                pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx)
+            # Setup time: dead-ball only (game clock runs; shot clock should start at full)
+            setup_map = {
+                "start_q": "setup_start_q",
+                "after_score": "setup_after_score",
+                "after_drb": "setup_after_drb",
+                "after_tov": "setup_after_tov",
+                "after_tov_dead": "setup_after_tov",
+            }
+            setup_key = setup_map.get(pos_start, "possession_setup")
+            setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
+            if setup_cost > 0:
+                apply_dead_ball_cost(game_state, setup_cost, tempo_mult)
+                if game_state.clock_sec <= 0:
+                    # account minutes for the setup time
+                    elapsed = max(start_clock - game_state.clock_sec, 0.0)
+                    _update_minutes(game_state, off_on_court, elapsed)
+                    _update_minutes(game_state, def_on_court, elapsed)
+                    game_state.clock_sec = 0
+                    break
 
-            finally:
-                offense.lineup = list(orig_lineups[offense.name])
-                defense.lineup = list(orig_lineups[defense.name])
+            # full shot clock starts after setup
+            game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+            pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx)
 
             elapsed = max(start_clock - game_state.clock_sec, 0.0)
             _update_minutes(game_state, off_on_court, elapsed)

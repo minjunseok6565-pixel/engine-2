@@ -93,12 +93,18 @@ def _unique_players(players: Sequence[Optional[Player]]) -> List[Player]:
     return uniq
 
 
+def _active(team: TeamState) -> List[Player]:
+    return team.on_court_players()
+
+
 def _role_player(team: TeamState, role_name: str) -> Optional[Player]:
     pid = team.roles.get(role_name)
     if not pid:
         return None
     p = team.find_player(pid)
-    return p
+    if p and team.is_on_court(p.pid):
+        return p
+    return None
 
 
 def _players_from_roles(team: TeamState, role_priority: Sequence[str]) -> List[Player]:
@@ -107,7 +113,7 @@ def _players_from_roles(team: TeamState, role_priority: Sequence[str]) -> List[P
 
 def _top_k_by_stat(team: TeamState, stat_key: str, k: int, exclude_pids: Optional[set] = None) -> List[Player]:
     exclude_pids = exclude_pids or set()
-    sorted_p = sorted(team.lineup, key=lambda p: p.get(stat_key), reverse=True)
+    sorted_p = sorted(_active(team), key=lambda p: p.get(stat_key), reverse=True)
     out: List[Player] = []
     for p in sorted_p:
         if p.pid in exclude_pids:
@@ -297,7 +303,7 @@ def choose_post_target(offense: TeamState) -> Player:
         return max(cand, key=lambda x: (x.get("POST_CONTROL"), x.get("POST_SCORE")))
 
     # Final fallback: pick best post controller from lineup (or simply the "biggest" by proxy).
-    return max(offense.lineup, key=lambda x: (x.get("POST_CONTROL"), x.get("POST_SCORE"), x.get("REB")))
+    return max(_active(offense), key=lambda x: (x.get("POST_CONTROL"), x.get("POST_SCORE"), x.get("REB")))
 
 
 # ---- Passer selection ----
@@ -332,14 +338,14 @@ def choose_passer(rng: random.Random, offense: TeamState, base_action: str, outc
             # Deterministic: prefer shortroll skill; fall back to passing.
             return max(cand, key=lambda x: (x.get("SHORTROLL_PLAY"), x.get("PASS_CREATE")))
         # Fallback: best shortroll playmaker if stat exists, else best passer.
-        best = max(offense.lineup, key=lambda x: (x.get("SHORTROLL_PLAY"), x.get("PASS_CREATE")))
+        best = max(_active(offense), key=lambda x: (x.get("SHORTROLL_PLAY"), x.get("PASS_CREATE")))
         return best
 
     if base_action == "PostUp":
         p = _role_player(offense, ROLE_POST_HUB)
         if p:
             return p
-        return max(offense.lineup, key=lambda x: (x.get("POST_CONTROL"), x.get("PASS_CREATE")))
+        return max(_active(offense), key=lambda x: (x.get("POST_CONTROL"), x.get("PASS_CREATE")))
 
     if style is not None and outcome in ("PASS_KICKOUT", "PASS_EXTRA", "PASS_SKIP"):
         info = _shot_diet_info(style)
@@ -347,7 +353,7 @@ def choose_passer(rng: random.Random, offense: TeamState, base_action: str, outc
         for pid in (info.get("primary_pid"), info.get("secondary_pid")):
             if pid:
                 p = offense.find_player(pid)
-                if p:
+                if p and offense.is_on_court(p.pid):
                     cands.append(p)
         cands = _unique_players(cands)
         if cands:
@@ -360,13 +366,13 @@ def choose_passer(rng: random.Random, offense: TeamState, base_action: str, outc
 
     if base_action == "Drive":
         # Candidate A: rim attacker (if assigned), otherwise the best driver
-        cand_a = _role_player(offense, ROLE_RIM_ATTACKER) or max(offense.lineup, key=lambda p: p.get("DRIVE_CREATE"))
+        cand_a = _role_player(offense, ROLE_RIM_ATTACKER) or max(_active(offense), key=lambda p: p.get("DRIVE_CREATE"))
         # Candidate B: primary initiator; else secondary; else connector; else best passer
         cand_b = (
             _role_player(offense, ROLE_INITIATOR_PRIMARY)
             or _role_player(offense, ROLE_INITIATOR_SECONDARY)
             or _role_player(offense, ROLE_CONNECTOR)
-            or max(offense.lineup, key=lambda p: p.get("PASS_CREATE"))
+            or max(_active(offense), key=lambda p: p.get("PASS_CREATE"))
         )
         cand = _unique_players([cand_a, cand_b])
         return choose_weighted_player(rng, cand, "PASS_CREATE", power=1.10)
@@ -376,7 +382,7 @@ def choose_passer(rng: random.Random, offense: TeamState, base_action: str, outc
         p = _role_player(offense, r)
         if p:
             return p
-    return max(offense.lineup, key=lambda x: x.get("PASS_CREATE"))
+    return max(_active(offense), key=lambda x: x.get("PASS_CREATE"))
 
 
 # ---- Assister selection (deterministic) ----
@@ -396,10 +402,10 @@ def choose_assister_deterministic(team: TeamState, shooter_pid: str) -> Optional
         pid = team.roles.get(role)
         if pid and pid != shooter_pid:
             p = team.find_player(pid)
-            if p:
+            if p and team.is_on_court(p.pid):
                 return p
 
-    others = [p for p in team.lineup if p.pid != shooter_pid]
+    others = [p for p in _active(team) if p.pid != shooter_pid]
     if not others:
         return None
     return max(others, key=lambda x: x.get("PASS_CREATE"))
@@ -430,16 +436,16 @@ def choose_default_actor(offense: TeamState) -> Player:
         pid = roles.get(role)
         if isinstance(pid, str) and pid:
             p = offense.find_player(pid)
-            if p is not None:
+            if p is not None and offense.is_on_court(p.pid):
                 return p
     # Final fallback: best creator/passer on the floor
-    return max(offense.lineup, key=lambda p: p.get("PASS_CREATE"))
+    return max(_active(offense), key=lambda p: p.get("PASS_CREATE"))
 
 
 def choose_orb_rebounder(rng: random.Random, offense: TeamState) -> Player:
     """Choose an offensive rebounder (keeps legacy behavior: top-3 ORB weighted)."""
     cand = sorted(
-        offense.lineup,
+        _active(offense),
         key=lambda p: p.get("REB_OR") + 0.20 * p.get("PHYSICAL"),
         reverse=True,
     )[:3]
@@ -449,7 +455,7 @@ def choose_orb_rebounder(rng: random.Random, offense: TeamState) -> Player:
 def choose_drb_rebounder(rng: random.Random, defense: TeamState) -> Player:
     """Choose a defensive rebounder (keeps legacy behavior: top-3 DRB weighted)."""
     cand = sorted(
-        defense.lineup,
+        _active(defense),
         key=lambda p: p.get("REB_DR") + 0.20 * p.get("PHYSICAL"),
         reverse=True,
     )[:3]

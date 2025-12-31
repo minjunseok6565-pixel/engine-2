@@ -19,7 +19,7 @@ Design principles (as agreed):
 
 Integration conditions (so you can use this file "as-is" with a UI-driven role system):
 - TeamState.roles must be a dict[str, str] mapping role_fit role names -> on-court player pid strings.
-  Example: roles["Initiator_Primary"] = "p123" (must match Player.pid in offense.lineup).
+  Example: roles["Initiator_Primary"] = "p123" (must match Player.pid on-court).
 - Primary handler selection reads ONLY roles["Initiator_Primary"].
   If no Initiator_Primary is on-court, this module falls back to max(_onball_score) and may try to write
   roles["Initiator_Primary"] = <pid> (best effort; safe to ignore if roles is read-only).
@@ -242,7 +242,7 @@ def _pick_primary_secondary(off: TeamState) -> Tuple[str, str, float, float, Dic
     - ball_handler == Initiator_Primary (must be on-court). If none on-court, assign best _onball_score as Initiator_Primary.
     - secondary_handler prefers Initiator_Secondary (on-court). If none on-court, pick best _onball_score excluding primary.
     """
-    lineup = off.lineup
+    lineup = off.on_court_players()
     pid_map = _pid_to_player(lineup)
 
     # roles values are expected to be on-court player pid strings (not Player objects).
@@ -321,7 +321,7 @@ def _pick_screeners(
     - If any on-court player's assigned role matches the scheme priority list, pick the first match.
     - If none match, fallback to _screen_score selection.
     """
-    lineup = off.lineup
+    lineup = off.on_court_players()
     pid_map = _pid_to_player(lineup)
     roles = off.roles if isinstance(getattr(off, "roles", None), dict) else {}
 
@@ -390,8 +390,8 @@ def compute_shot_diet_style(
     Cache key: on-court pids + role hints + (bucketed) on-court energy (fatigue-sensitive).
     """
     # Sort by pid to ensure stable cache keys.
-    off_sorted = sorted(offense.lineup, key=lambda p: p.pid)
-    def_sorted = sorted(defense.lineup, key=lambda p: p.pid)
+    off_sorted = sorted(offense.on_court_players(), key=lambda p: p.pid)
+    def_sorted = sorted(defense.on_court_players(), key=lambda p: p.pid)
 
     off_pids = tuple(p.pid for p in off_sorted)
     def_pids = tuple(p.pid for p in def_sorted)
@@ -441,7 +441,7 @@ def compute_shot_diet_style(
     primary, secondary, w1, w2, meta_h = _pick_primary_secondary(offense)
     scr1, scr2, meta_s = _pick_screeners(offense, primary, secondary, scheme_norm)
 
-    lineup = offense.lineup
+    lineup = offense.on_court_players()
     pid_map = _pid_to_player(lineup)
     p_primary = pid_map[primary]
     p_secondary = pid_map[secondary]
@@ -564,7 +564,7 @@ def compute_shot_diet_style(
     }
 
     # ---------- Defense features (Spec v1) ----------
-    dline = defense.lineup
+    dline = defense.on_court_players()
 
     # Top-1 mean for rim/poa/post, mean for help/steal/dreb
     # If DEF_* keys missing, Player.get returns 50 -> BASELINE; that's acceptable.
