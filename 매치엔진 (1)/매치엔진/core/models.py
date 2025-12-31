@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import warnings
+
 from .core import clamp
 
 
@@ -67,6 +69,7 @@ class TeamState:
     lineup: List[Player]
     roles: Dict[str, str]  # role -> pid (chosen via UI)
     tactics: "TacticsConfig"
+    on_court_pids: List[str] = field(default_factory=list)
 
 
     # -------------------------
@@ -124,6 +127,64 @@ class TeamState:
             if p.pid == pid:
                 return p
         return None
+
+    def set_on_court(self, pids: List[str], strict: bool = False) -> None:
+        roster_pids = [p.pid for p in self.lineup]
+        roster_set = set(roster_pids)
+        requested = [str(pid) for pid in (pids or []) if pid is not None]
+
+        seen = set()
+        normalized: List[str] = []
+        dropped: List[str] = []
+        for pid in requested:
+            if pid in seen:
+                dropped.append(pid)
+                continue
+            if pid not in roster_set:
+                dropped.append(pid)
+                continue
+            seen.add(pid)
+            normalized.append(pid)
+
+        filled = []
+        if len(normalized) < 5:
+            for pid in roster_pids:
+                if pid in seen:
+                    continue
+                normalized.append(pid)
+                filled.append(pid)
+                seen.add(pid)
+                if len(normalized) >= 5:
+                    break
+
+        if len(normalized) > 5:
+            normalized = normalized[:5]
+
+        issues = []
+        if dropped:
+            issues.append(f"dropped={dropped}")
+        if filled:
+            issues.append(f"filled={filled}")
+        if len(requested) != len(pids or []):
+            issues.append("coerced_non_string")
+        if len(normalized) != 5:
+            issues.append(f"size={len(normalized)}")
+
+        if issues:
+            msg = f"{self.name}: on_court normalized ({'; '.join(issues)})"
+            if strict:
+                raise ValueError(msg)
+            warnings.warn(msg)
+
+        self.on_court_pids = normalized
+
+    def on_court_players(self) -> List[Player]:
+        if not self.on_court_pids or len(self.on_court_pids) != 5:
+            self.set_on_court(self.on_court_pids, strict=False)
+        return [p for pid in self.on_court_pids for p in [self.find_player(pid)] if p is not None]
+
+    def is_on_court(self, pid: str) -> bool:
+        return pid in self.on_court_pids
 
     def add_player_stat(self, pid: str, key: str, inc: int = 1) -> None:
         if pid not in self.player_stats:

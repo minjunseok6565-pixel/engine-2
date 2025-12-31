@@ -170,10 +170,11 @@ def _get_on_court(game_state: GameState, team: TeamState, home: TeamState) -> Li
 
 
 def _set_on_court(game_state: GameState, team: TeamState, home: TeamState, players: List[str]) -> None:
+    team.set_on_court(list(players))
     if team is home:
-        game_state.on_court_home = list(players)
+        game_state.on_court_home = list(team.on_court_pids)
     else:
-        game_state.on_court_away = list(players)
+        game_state.on_court_away = list(team.on_court_pids)
 
 
 def _update_minutes(game_state: GameState, pids: List[str], delta_sec: float) -> None:

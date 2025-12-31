@@ -141,13 +141,13 @@ def build_def_role_players(
 
     fixed_pids = {p.pid for p in fixed.values()}
     remaining_roles = [r for r in roles if r not in fixed]
-    remaining_players = [p for p in defense.lineup if p.pid not in fixed_pids]
+    remaining_players = [p for p in defense.on_court_players() if p.pid not in fixed_pids]
 
     # If there are more roles than remaining players, we can optionally reuse.
     if remaining_roles and (len(remaining_roles) > len(remaining_players)) and not config.allow_player_reuse:
         # Fallback: allow reuse to avoid hard failure.
         # This should not happen in normal 5-man lineup schemes.
-        remaining_players = list(defense.lineup)
+        remaining_players = list(defense.on_court_players())
 
     # 2) Compute score matrix for remaining roles/players.
     #    score[role_idx][player_idx]

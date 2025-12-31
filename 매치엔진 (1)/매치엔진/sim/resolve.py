@@ -99,8 +99,10 @@ def resolve_free_throws(rng: random.Random, shooter: Player, n: int, team: TeamS
     return {"fta": fta, "ftm": ftm, "last_made": last_made, "p_ft": float(p)}
 
 def rebound_orb_probability(offense: TeamState, defense: TeamState, orb_mult: float, drb_mult: float) -> float:
-    off_orb = sum(p.get("REB_OR") for p in offense.lineup) / len(offense.lineup)
-    def_drb = sum(p.get("REB_DR") for p in defense.lineup) / len(defense.lineup)
+    off_players = offense.on_court_players()
+    def_players = defense.on_court_players()
+    off_orb = sum(p.get("REB_OR") for p in off_players) / max(len(off_players), 1)
+    def_drb = sum(p.get("REB_DR") for p in def_players) / max(len(def_players), 1)
     off_orb *= orb_mult
     def_drb *= drb_mult
     base = float(ERA_PROB_MODEL.get('orb_base', 0.26)) * float(ORB_BASE)
@@ -619,7 +621,7 @@ def resolve_outcome(
         player_fouls = ctx.get("player_fouls") or {}
         foul_out_limit = int(ctx.get("foul_out", 6))
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
-        def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.lineup]
+        def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
 
         # assign a random fouler from on-court defenders (MVP)
         if def_on_court:
