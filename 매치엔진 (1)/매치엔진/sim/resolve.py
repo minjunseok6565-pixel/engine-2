@@ -185,14 +185,24 @@ def resolve_outcome(
     # count outcome
     offense.outcome_counts[outcome] = offense.outcome_counts.get(outcome, 0) + 1
 
+    if ctx is None:
+        ctx = {}
+
+    off_team_key = str(ctx.get("off_team_key") or "")
+    def_team_key = str(ctx.get("def_team_key") or "")
+
+    def _with_team(payload: Dict[str, Any], include_fouler: bool = False) -> Dict[str, Any]:
+        if off_team_key:
+            payload.setdefault("team", off_team_key)
+        if include_fouler and def_team_key:
+            payload.setdefault("fouler_team", def_team_key)
+        return payload
+
     if outcome == "TO_SHOT_CLOCK":
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
-
-    if ctx is None:
-        ctx = {}
+        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
 
     def _record_exception(where: str, exc: BaseException) -> None:
         """Record exceptions into ctx for debugging without breaking sim flow."""
@@ -425,7 +435,7 @@ def resolve_outcome(
             if zone_detail in ("Restricted_Area", "Paint_Non_RA"):
                 offense.pitp += 2
 
-            return "SCORE", {
+            return "SCORE", _with_team({
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -433,9 +443,9 @@ def resolve_outcome(
                 "assisted": assisted,
                 "assister_pid": assister_pid,
                 **shot_dbg,
-            }
+            })
         else:
-            return "MISS", {
+            return "MISS", _with_team({
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -443,7 +453,7 @@ def resolve_outcome(
                 "assisted": False,
                 "assister_pid": None,
                 **shot_dbg,
-            }
+            })
 
     if is_pass(outcome):
         base_s = PASS_BASE_SUCCESS.get(outcome, 0.90) * float(PASS_BASE_SUCCESS_MULT)
@@ -527,7 +537,7 @@ def resolve_outcome(
                         "carry_in": float(carry_in),
                     }
                 )
-            return "TURNOVER", payload
+            return "TURNOVER", _with_team(payload)
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
         p_reset = float(sigmoid(s_reset * (t_reset - q_score)))
@@ -614,36 +624,40 @@ def resolve_outcome(
     if is_to(outcome):
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
+        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
     if is_foul(outcome):
         fouler_pid = None
         team_fouls = ctx.get("team_fouls") or {}
-        player_fouls = ctx.get("player_fouls") or {}
+        player_fouls_by_team = ctx.get("player_fouls_by_team") or {}
+        pf = player_fouls_by_team.setdefault(def_team_key, {})
         foul_out_limit = int(ctx.get("foul_out", 6))
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
         def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
 
         # assign a random fouler from on-court defenders (MVP)
         if def_on_court:
-            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), player_fouls, foul_out_limit)
+            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit)
             if fouler_pid:
-                player_fouls[fouler_pid] = player_fouls.get(fouler_pid, 0) + 1
+                pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
                 if game_state is not None:
-                    game_state.player_fouls[fouler_pid] = player_fouls[fouler_pid]
+                    game_state.player_fouls.setdefault(def_team_key, {})[fouler_pid] = pf[fouler_pid]
 
         # update team fouls
-        team_fouls[defense.name] = team_fouls.get(defense.name, 0) + 1
+        team_fouls[def_team_key] = team_fouls.get(def_team_key, 0) + 1
         if game_state is not None:
-            game_state.team_fouls[defense.name] = team_fouls[defense.name]
+            game_state.team_fouls[def_team_key] = team_fouls[def_team_key]
 
-        in_bonus = bool(team_fouls.get(defense.name, 0) >= bonus_threshold)
+        in_bonus = bool(team_fouls.get(def_team_key, 0) >= bonus_threshold)
 
         # Non-shooting foul (reach/trap) becomes dead-ball unless in bonus.
         if outcome == "FOUL_REACH_TRAP" and not in_bonus:
-            if fouler_pid and player_fouls.get(fouler_pid, 0) >= foul_out_limit:
+            if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
                 if game_state is not None:
-                    game_state.fatigue[fouler_pid] = 0.0
-            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+                    game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+            return "FOUL_NO_SHOTS", _with_team(
+                {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False},
+                include_fouler=True,
+            )
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
@@ -800,9 +814,9 @@ def resolve_outcome(
 
         ft_res = resolve_free_throws(rng, actor, nfts, offense)
 
-        if fouler_pid and player_fouls.get(fouler_pid, 0) >= foul_out_limit:
+        if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
             if game_state is not None:
-                game_state.fatigue[fouler_pid] = 0.0
+                game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
 
         payload = {
             "outcome": outcome,
@@ -818,7 +832,7 @@ def resolve_outcome(
             payload.update(ft_res)
         if isinstance(foul_dbg, dict) and foul_dbg:
             payload.update(foul_dbg)
-        return "FOUL_FT", payload
+        return "FOUL_FT", _with_team(payload, include_fouler=True)
 
 
     if is_reset(outcome):

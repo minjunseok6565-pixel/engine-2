@@ -31,9 +31,9 @@ class GameState:
     score_away: int
     possession: int = 0
     team_fouls: Dict[str, int] = field(default_factory=dict)
-    player_fouls: Dict[str, int] = field(default_factory=dict)
-    minutes_played_sec: Dict[str, int] = field(default_factory=dict)
-    fatigue: Dict[str, float] = field(default_factory=dict)
+    player_fouls: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    minutes_played_sec: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    fatigue: Dict[str, Dict[str, float]] = field(default_factory=dict)
     on_court_home: List[str] = field(default_factory=list)
     on_court_away: List[str] = field(default_factory=list)
     targets_sec_home: Dict[str, int] = field(default_factory=dict)

@@ -14,6 +14,7 @@ import random
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .models import GameState, TeamState
+from .team_keys import team_key
 
 
 # -------------------------
@@ -177,10 +178,18 @@ def _set_on_court(game_state: GameState, team: TeamState, home: TeamState, playe
         game_state.on_court_away = list(team.on_court_pids)
 
 
-def _update_minutes(game_state: GameState, pids: List[str], delta_sec: float) -> None:
+def _update_minutes(
+    game_state: GameState,
+    pids: List[str],
+    delta_sec: float,
+    team: TeamState,
+    home: TeamState,
+) -> None:
     inc = int(max(delta_sec, 0))
+    key = team_key(team, home)
+    mins_map = game_state.minutes_played_sec.setdefault(key, {})
     for pid in pids:
-        game_state.minutes_played_sec[pid] = game_state.minutes_played_sec.get(pid, 0) + inc
+        mins_map[pid] = mins_map.get(pid, 0) + inc
 
 
 def _perform_rotation(
@@ -224,20 +233,24 @@ def _perform_rotation(
     foul_out = int(rules.get("foul_out", 6))
     targets = game_state.targets_sec_home if team is home else game_state.targets_sec_away
     on_court = list(_get_on_court(game_state, team, home))
+    key = team_key(team, home)
+    pf_map = game_state.player_fouls.get(key, {})
+    fat_map = game_state.fatigue.get(key, {})
+    mins_map = game_state.minutes_played_sec.get(key, {})
 
     # bench candidates: any non-fouled-out player not currently on court
     bench = [
         p.pid
         for p in team.lineup
-        if p.pid not in on_court and game_state.player_fouls.get(p.pid, 0) < foul_out
+        if p.pid not in on_court and pf_map.get(p.pid, 0) < foul_out
     ]
 
     # helpers
     def fatigue(pid: str) -> float:
-        return float(game_state.fatigue.get(pid, 1.0))
+        return float(fat_map.get(pid, 1.0))
 
     def minutes(pid: str) -> int:
-        return int(game_state.minutes_played_sec.get(pid, 0))
+        return int(mins_map.get(pid, 0))
 
     def target(pid: str) -> int:
         return int(targets.get(pid, 0))
@@ -309,7 +322,7 @@ def _perform_rotation(
 
     # Score on-court players for removal: prefer those who can afford rest and are not needed for targets
     def out_score(pid_out: str) -> float:
-        if game_state.player_fouls.get(pid_out, 0) >= foul_out:
+        if pf_map.get(pid_out, 0) >= foul_out:
             return 1e9  # forced
         if is_locked(pid_out):
             return -1e9  # do not sub out (unless foul-out)
@@ -350,7 +363,7 @@ def _perform_rotation(
             break
 
         # If pid_out is a forced foul-out, we must replace regardless.
-        forced_out = game_state.player_fouls.get(pid_out, 0) >= foul_out
+        forced_out = pf_map.get(pid_out, 0) >= foul_out
 
         # Select the best pid_in subject to constraints.
         best_pid_in: Optional[str] = None
@@ -360,7 +373,7 @@ def _perform_rotation(
 
         for pid_in in in_candidates:
             # Do not sub in a fouled-out player (already filtered, but keep safe)
-            if game_state.player_fouls.get(pid_in, 0) >= foul_out:
+            if pf_map.get(pid_in, 0) >= foul_out:
                 continue
 
             # Initiator constraint:

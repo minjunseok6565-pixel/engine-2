@@ -8,6 +8,7 @@ NOTE: Split from sim.py on 2025-12-27.
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .models import GameState, TeamState
+from .team_keys import team_key
 
 
 # Prefer to reuse the same role->group mapping as sim_rotation (keeps rotation + fatigue consistent).
@@ -142,6 +143,7 @@ def _apply_fatigue_loss(
     rules: Dict[str, Any],
     intensity: Dict[str, bool],
     elapsed_sec: float,  # ★ 추가: 실제 흘러간 시간(초)
+    home: TeamState,
 ) -> None:
     if elapsed_sec <= 0:
         return
@@ -174,6 +176,8 @@ def _apply_fatigue_loss(
 
     # --- on-court: 소모 ---
     role_by_pid = _get_offense_role_by_pid(team)
+    key = team_key(team, home)
+    fat_map = game_state.fatigue.setdefault(key, {})
 
     for pid in on_court:
         # Use configured offensive roles if available; otherwise fallback to legacy role+position heuristics.
@@ -190,14 +194,14 @@ def _apply_fatigue_loss(
         c01 = cap01(pid)
         loss *= lerp(drain_lo, drain_hi, c01)
 
-        game_state.fatigue[pid] = clamp01(float(game_state.fatigue.get(pid, 1.0)) - float(loss))
+        fat_map[pid] = clamp01(float(fat_map.get(pid, 1.0)) - float(loss))
 
     # --- bench: 회복 ---
     bench_pids = [p.pid for p in team.lineup if p.pid not in on_court]
     for pid in bench_pids:
         c01 = cap01(pid)
         rec = bench_rec_per_sec * float(elapsed_sec) * lerp(rec_lo, rec_hi, c01)
-        game_state.fatigue[pid] = clamp01(float(game_state.fatigue.get(pid, 1.0)) + float(rec))
+        fat_map[pid] = clamp01(float(fat_map.get(pid, 1.0)) + float(rec))
 
 def _apply_break_recovery(
     team: TeamState,
@@ -205,6 +209,7 @@ def _apply_break_recovery(
     game_state: GameState,
     rules: Dict[str, Any],
     break_sec: float,
+    home: TeamState,
 ) -> None:
     """Recover fatigue during period/OT breaks. No clock/minutes are consumed."""
     if break_sec <= 0:
@@ -231,16 +236,18 @@ def _apply_break_recovery(
     br = rules.get("break_recovery", {}) or {}
     on_per_sec = float(br.get("on_court_per_sec", 0.0010))
     bench_per_sec = float(br.get("bench_per_sec", 0.0016))
+    key = team_key(team, home)
+    fat_map = game_state.fatigue.setdefault(key, {})
 
     # on-court players recover
     for pid in on_court:
         c01 = cap01(pid)
         rec = on_per_sec * float(break_sec) * lerp(rec_lo, rec_hi, c01)
-        game_state.fatigue[pid] = clamp01(float(game_state.fatigue.get(pid, 1.0)) + float(rec))
+        fat_map[pid] = clamp01(float(fat_map.get(pid, 1.0)) + float(rec))
 
     # bench players recover
     bench_pids = [p.pid for p in team.lineup if p.pid not in on_court]
     for pid in bench_pids:
         c01 = cap01(pid)
         rec = bench_per_sec * float(break_sec) * lerp(rec_lo, rec_hi, c01)
-        game_state.fatigue[pid] = clamp01(float(game_state.fatigue.get(pid, 1.0)) + float(rec))
+        fat_map[pid] = clamp01(float(fat_map.get(pid, 1.0)) + float(rec))

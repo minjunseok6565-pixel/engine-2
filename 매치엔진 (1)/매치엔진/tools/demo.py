@@ -8,6 +8,7 @@ from .core import clamp
 from .era import get_mvp_rules
 from .models import Player, TeamState
 from .sim import simulate_game
+from .sim.team_keys import team_key
 from .tactics import TacticsConfig
 
 
@@ -24,15 +25,16 @@ def _fmt_pct(made: float, att: float) -> str:
 def _fmt_min(sec: float) -> str:
     return f"{sec / 60.0:.1f}"
 
-def print_player_boxscore_table(team: TeamState, res: dict) -> None:
+def print_player_boxscore_table(team: TeamState, res: dict, home: TeamState) -> None:
     team_res = (res.get("teams") or {}).get(team.name, {}) or {}
     players_raw = team_res.get("Players") or {}
     # Optional precomputed box (from patched sim). If present but raw missing, fall back to it.
     pre_box = team_res.get("PlayerBox") or {}
 
     gs = res.get("game_state") or {}
-    mins_map = gs.get("minutes_played_sec") or {}
-    pf_map = gs.get("player_fouls") or {}
+    key = team_key(team, home)
+    mins_map = (gs.get("minutes_played_sec") or {}).get(key, {}) or {}
+    pf_map = (gs.get("player_fouls") or {}).get(key, {}) or {}
 
     rows = []
 
@@ -242,10 +244,15 @@ def demo(seed: int = 7) -> None:
 
         print(f"\n=== Run: {label} (Defense scheme={def_scheme}) ===")
         print(f"Final Score: {teamA.name} {score_a} - {teamB.name} {score_b}")
-        print_player_boxscore_table(teamA, res)
-        print_player_boxscore_table(teamB, res)
+        print_player_boxscore_table(teamA, res, home=teamA)
+        print_player_boxscore_table(teamB, res, home=teamA)
         print("Team fouls:", fouls)
-        sample_fatigue = {pid: round(fatigue.get(pid, 1.0), 3) for pid in list(fatigue.keys())[:4]}
+        home_key = team_key(teamA, teamA)
+        away_key = team_key(teamB, teamA)
+        sample_fatigue = {
+            home_key: {pid: round(fatigue.get(home_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(home_key, {}).keys())[:4]},
+            away_key: {pid: round(fatigue.get(away_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(away_key, {}).keys())[:4]},
+        }
         print("Sample fatigue:", sample_fatigue)
         print("Action frequency (team A offense):", freq)
         print("Possessions per team:", res["possessions_per_team"])
@@ -312,10 +319,15 @@ def run_excel_match(args) -> None:
 
     print(f"\n=== Run: {label} ===")
     print(f"Final Score: {teamA.name} {score_a} - {teamB.name} {score_b}")
-    print_player_boxscore_table(teamA, res)
-    print_player_boxscore_table(teamB, res)
+    print_player_boxscore_table(teamA, res, home=teamA)
+    print_player_boxscore_table(teamB, res, home=teamA)
     print("Team fouls:", fouls)
-    sample_fatigue = {pid: round(fatigue.get(pid, 1.0), 3) for pid in list(fatigue.keys())[:4]}
+    home_key = team_key(teamA, teamA)
+    away_key = team_key(teamB, teamA)
+    sample_fatigue = {
+        home_key: {pid: round(fatigue.get(home_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(home_key, {}).keys())[:4]},
+        away_key: {pid: round(fatigue.get(away_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(away_key, {}).keys())[:4]},
+    }
     print("Sample fatigue:", sample_fatigue)
     print("Action frequency (team A offense):", freq)
     print("Possessions per team:", res.get("possessions_per_team"))
