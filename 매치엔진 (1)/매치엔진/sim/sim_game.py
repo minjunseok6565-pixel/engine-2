@@ -22,6 +22,7 @@ from .era import apply_era_config, get_mvp_rules, load_era_config
 from .sim_clock import apply_dead_ball_cost
 from .sim_fatigue import _apply_break_recovery, _apply_fatigue_loss
 from .sim_rotation import _get_on_court, _init_targets, _perform_rotation, _set_on_court, _update_minutes
+from .team_keys import AWAY, HOME, team_key
 from .sim_possession import simulate_possession
 
 # -------------------------
@@ -153,14 +154,19 @@ def init_player_boxes(team: TeamState) -> None:
 def _safe_pct(made: int, att: int) -> float:
     return round((float(made) / float(att)) * 100.0, 2) if att else 0.0
 
-def build_player_box(team: TeamState, game_state: Optional[GameState] = None) -> Dict[str, Dict[str, Any]]:
+def build_player_box(
+    team: TeamState,
+    game_state: Optional[GameState] = None,
+    home: Optional[TeamState] = None,
+) -> Dict[str, Dict[str, Any]]:
     """Return per-player box score with derived percentages + minutes + fouls.
 
     Note: this engine currently does NOT track AST/STL/BLK; only fields that exist in
     TeamState.player_stats and GameState are included.
     """
-    fouls = dict(getattr(game_state, "player_fouls", {}) or {}) if game_state is not None else {}
-    mins = dict(getattr(game_state, "minutes_played_sec", {}) or {}) if game_state is not None else {}
+    key = team_key(team, home) if game_state is not None and home is not None else None
+    fouls = dict(getattr(game_state, "player_fouls", {}).get(key, {}) or {}) if key else {}
+    mins = dict(getattr(game_state, "minutes_played_sec", {}).get(key, {}) or {}) if key else {}
 
     out: Dict[str, Dict[str, Any]] = {}
     for p in team.lineup:
@@ -184,7 +190,13 @@ def build_player_box(team: TeamState, game_state: Optional[GameState] = None) ->
         }
     return out
 
-def summarize_team(team: TeamState, game_state: Optional[GameState] = None) -> Dict[str, Any]:
+def summarize_team(
+    team: TeamState,
+    game_state: Optional[GameState] = None,
+    home: Optional[TeamState] = None,
+) -> Dict[str, Any]:
+    key = team_key(team, home) if game_state is not None and home is not None else None
+    fat_map = game_state.fatigue.get(key, {}) if key else {}
     return {
         "PTS": team.pts,
         "FGM": team.fgm, "FGA": team.fga,
@@ -204,8 +216,8 @@ def summarize_team(team: TeamState, game_state: Optional[GameState] = None) -> D
         "DefActionCounts": dict(sorted(team.def_action_counts.items(), key=lambda x: -x[1])),
         "OutcomeCounts": dict(sorted(team.outcome_counts.items(), key=lambda x: -x[1])),
         "Players": team.player_stats,
-        "PlayerBox": build_player_box(team, game_state),
-        "AvgFatigue": (sum((game_state.fatigue.get(p.pid, 1.0) if game_state else 1.0) for p in team.lineup) / max(len(team.lineup), 1)),
+        "PlayerBox": build_player_box(team, game_state, home=home),
+        "AvgFatigue": (sum((fat_map.get(p.pid, 1.0) if game_state else 1.0) for p in team.lineup) / max(len(team.lineup), 1)),
         "ShotZones": dict(team.shot_zones),
     }
 
@@ -258,6 +270,7 @@ def simulate_game(
     init_player_boxes(teamB)
 
     rules = get_mvp_rules()
+    home = teamA
     targets_home = _init_targets(teamA, rules)
     targets_away = _init_targets(teamB, rules)
 
@@ -274,10 +287,16 @@ def simulate_game(
         score_home=teamA.pts,
         score_away=teamB.pts,
         possession=0,
-        team_fouls={teamA.name: 0, teamB.name: 0},
-        player_fouls={},
-        fatigue={p.pid: 1.0 for p in teamA.lineup + teamB.lineup},
-        minutes_played_sec={p.pid: 0 for p in teamA.lineup + teamB.lineup},
+        team_fouls={HOME: 0, AWAY: 0},
+        player_fouls={HOME: {}, AWAY: {}},
+        fatigue={
+            HOME: {p.pid: 1.0 for p in teamA.lineup},
+            AWAY: {p.pid: 1.0 for p in teamB.lineup},
+        },
+        minutes_played_sec={
+            HOME: {p.pid: 0 for p in teamA.lineup},
+            AWAY: {p.pid: 0 for p in teamB.lineup},
+        },
         on_court_home=list(start_home),
         on_court_away=list(start_away),
         targets_sec_home=targets_home,
@@ -296,8 +315,8 @@ def simulate_game(
         nonlocal total_possessions, replay_token
         game_state.quarter = q + 1
         game_state.clock_sec = float(period_length_sec)
-        game_state.team_fouls[teamA.name] = 0
-        game_state.team_fouls[teamB.name] = 0
+        game_state.team_fouls[HOME] = 0
+        game_state.team_fouls[AWAY] = 0
 
         # Period start possession:
         # - Regulation: alternate (A starts Q1/Q3, B starts Q2/Q4)
@@ -305,7 +324,7 @@ def simulate_game(
         if q < regulation_quarters:
             offense = teamA if (q % 2 == 0) else teamB
         else:
-            offense = _choose_ot_start_offense(rng, rules, game_state, teamA, teamB, home=teamA)
+            offense = _choose_ot_start_offense(rng, rules, game_state, teamA, teamB, home=home)
 
         defense = teamB if offense is teamA else teamA
         pos_start = "start_q"
@@ -327,14 +346,18 @@ def simulate_game(
 
             off_players = offense.on_court_players()
             def_players = defense.on_court_players()
+            off_key = team_key(offense, home)
+            def_key = team_key(defense, home)
+            off_fatigue_map = game_state.fatigue.setdefault(off_key, {})
+            def_fatigue_map = game_state.fatigue.setdefault(def_key, {})
 
             for p in off_players:
-                p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
+                p.energy = clamp(off_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
             for p in def_players:
-                p.energy = clamp(game_state.fatigue.get(p.pid, 1.0), 0.0, 1.0)
+                p.energy = clamp(def_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
 
-            avg_off_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
-            avg_def_fatigue = sum(game_state.fatigue.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
+            avg_off_fatigue = sum(off_fatigue_map.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
+            avg_def_fatigue = sum(def_fatigue_map.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
             def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
 
             score_diff = teamA.pts - teamB.pts
@@ -350,6 +373,8 @@ def simulate_game(
             )
 
             ctx = {
+                "off_team_key": off_key,
+                "def_team_key": def_key,
                 "score_diff": score_diff,
                 "is_clutch": is_clutch,
                 "is_garbage": is_garbage,
@@ -362,11 +387,11 @@ def simulate_game(
                 "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
                 "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
                 "def_eff_mult": def_eff_mult,
-                "fatigue_map": game_state.fatigue,
+                "fatigue_map": off_fatigue_map,
                 "def_on_court": def_on_court,
                 "off_on_court": off_on_court,
                 "team_fouls": game_state.team_fouls,
-                "player_fouls": game_state.player_fouls,
+                "player_fouls_by_team": game_state.player_fouls,
                 "foul_out": int(rules.get("foul_out", 6)),
                 "bonus_threshold": bonus_threshold,
                 "pos_start": pos_start,
@@ -388,8 +413,8 @@ def simulate_game(
                 if game_state.clock_sec <= 0:
                     # account minutes for the setup time
                     elapsed = max(start_clock - game_state.clock_sec, 0.0)
-                    _update_minutes(game_state, off_on_court, elapsed)
-                    _update_minutes(game_state, def_on_court, elapsed)
+                    _update_minutes(game_state, off_on_court, elapsed, offense, home)
+                    _update_minutes(game_state, def_on_court, elapsed, defense, home)
                     game_state.clock_sec = 0
                     break
 
@@ -398,8 +423,8 @@ def simulate_game(
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx)
 
             elapsed = max(start_clock - game_state.clock_sec, 0.0)
-            _update_minutes(game_state, off_on_court, elapsed)
-            _update_minutes(game_state, def_on_court, elapsed)
+            _update_minutes(game_state, off_on_court, elapsed, offense, home)
+            _update_minutes(game_state, def_on_court, elapsed, defense, home)
 
             intensity_off = {
                 "transition_emphasis": bool(offense.tactics.context.get("TRANSITION_EMPHASIS", False)),
@@ -409,8 +434,8 @@ def simulate_game(
                 "transition_emphasis": bool(defense.tactics.context.get("TRANSITION_EMPHASIS", False)),
                 "heavy_pnr": bool(defense.tactics.context.get("HEAVY_PNR", False)) or "PnR" in defense.tactics.defense_scheme,
             }
-            _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed)
-            _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed)
+            _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed, home)
+            _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed, home)
 
             pts_scored = int(pos_res.get("points_scored", 0))
             had_orb = bool(pos_res.get("had_orb", False))
@@ -436,8 +461,8 @@ def simulate_game(
                 except Exception:
                     pass
 
-            _perform_rotation(rng, offense, teamA, game_state, rules, is_garbage)
-            _perform_rotation(rng, defense, teamA, game_state, rules, is_garbage)
+            _perform_rotation(rng, offense, home, game_state, rules, is_garbage)
+            _perform_rotation(rng, defense, home, game_state, rules, is_garbage)
 
             total_possessions += 1
             game_state.score_home = teamA.pts
@@ -456,10 +481,10 @@ def simulate_game(
     def _apply_period_break(break_sec: float) -> None:
         if break_sec <= 0:
             return
-        onA = _get_on_court(game_state, teamA, teamA)
-        onB = _get_on_court(game_state, teamB, teamA)
-        _apply_break_recovery(teamA, onA, game_state, rules, break_sec)
-        _apply_break_recovery(teamB, onB, game_state, rules, break_sec)
+        onA = _get_on_court(game_state, teamA, home)
+        onB = _get_on_court(game_state, teamB, home)
+        _apply_break_recovery(teamA, onA, game_state, rules, break_sec, home)
+        _apply_break_recovery(teamB, onB, game_state, rules, break_sec, home)
 
     break_between = float(rules.get("break_sec_between_periods", 0.0))
     break_before_ot = float(rules.get("break_sec_before_ot", break_between))
@@ -505,8 +530,8 @@ def simulate_game(
         },
         "possessions_per_team": max(teamA.possessions, teamB.possessions),
         "teams": {
-            teamA.name: summarize_team(teamA, game_state),
-            teamB.name: summarize_team(teamB, game_state),
+            teamA.name: summarize_team(teamA, game_state, home=home),
+            teamB.name: summarize_team(teamB, game_state, home=home),
         },
         "game_state": {
             "team_fouls": dict(game_state.team_fouls),
