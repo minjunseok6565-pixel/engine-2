@@ -4,21 +4,15 @@ from .profiles import OUTCOME_PROFILES
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .core import clamp
 from .models import DERIVED_DEFAULT, Player, TeamState, ROLE_FALLBACK_RANK
-from .profiles import (
-    ACTION_ALIASES,
-    ACTION_OUTCOME_PRIORS,
-    DEFENSE_SCHEME_MULT,
-    DEF_SCHEME_ACTION_WEIGHTS,
-    OFFENSE_SCHEME_MULT,
-    OFF_SCHEME_ACTION_WEIGHTS,
-    PASS_BASE_SUCCESS,
-    SHOT_BASE,
-)
 from .tactics import TacticsConfig
+
+if TYPE_CHECKING:
+    from config.game_config import GameConfig
 
 SHOT_DIET_SUPPORTED_OFFENSE_SCHEMES = {
     "Spread_HeavyPnR",
@@ -107,46 +101,56 @@ def _collect_required_derived_keys() -> List[str]:
 REQUIRED_DERIVED_KEYS: List[str] = _collect_required_derived_keys()
 
 
-def _collect_allowed_off_actions() -> set[str]:
-    s: set[str] = set()
-    for d in OFF_SCHEME_ACTION_WEIGHTS.values():
-        s.update(d.keys())
-    # base actions and aliases should also be allowed
-    s.update(ACTION_OUTCOME_PRIORS.keys())
-    s.update(ACTION_ALIASES.keys())
-    s.update(ACTION_ALIASES.values())
-    return s
+@dataclass(frozen=True)
+class AllowedSets:
+    offense_actions: set[str]
+    defense_actions: set[str]
+    outcomes: set[str]
+    offense_schemes: set[str]
+    defense_schemes: set[str]
 
 
-def _collect_allowed_def_actions() -> set[str]:
-    s: set[str] = set()
-    for d in DEF_SCHEME_ACTION_WEIGHTS.values():
-        s.update(d.keys())
-    return s
+def build_allowed_sets(game_cfg: "GameConfig") -> AllowedSets:
+    offense_actions: set[str] = set()
+    defense_actions: set[str] = set()
+    outcomes: set[str] = set()
+    offense_schemes = set(game_cfg.off_scheme_action_weights.keys())
+    defense_schemes = set(game_cfg.def_scheme_action_weights.keys())
 
+    for scheme in game_cfg.off_scheme_action_weights.values():
+        if isinstance(scheme, Mapping):
+            offense_actions.update(scheme.keys())
+    for scheme in game_cfg.def_scheme_action_weights.values():
+        if isinstance(scheme, Mapping):
+            defense_actions.update(scheme.keys())
 
-def _collect_allowed_outcomes() -> set[str]:
-    s: set[str] = set()
-    s.update(OUTCOME_PROFILES.keys())
-    s.update(SHOT_BASE.keys())
-    s.update(PASS_BASE_SUCCESS.keys())
-    for pri in ACTION_OUTCOME_PRIORS.values():
-        s.update(pri.keys())
-    return s
+    action_aliases = game_cfg.action_aliases
+    if isinstance(action_aliases, Mapping):
+        offense_actions.update(action_aliases.keys())
+        offense_actions.update(action_aliases.values())
 
+    action_outcome_priors = game_cfg.action_outcome_priors
+    if isinstance(action_outcome_priors, Mapping):
+        offense_actions.update(action_outcome_priors.keys())
+        for pri in action_outcome_priors.values():
+            if isinstance(pri, Mapping):
+                outcomes.update(pri.keys())
 
-ALLOWED_OFF_ACTIONS: set[str] = set()
-ALLOWED_DEF_ACTIONS: set[str] = set()
-ALLOWED_OUTCOMES: set[str] = set()
+    outcomes.update(OUTCOME_PROFILES.keys())
+    shot_base = game_cfg.shot_base
+    pass_base_success = game_cfg.pass_base_success
+    if isinstance(shot_base, Mapping):
+        outcomes.update(shot_base.keys())
+    if isinstance(pass_base_success, Mapping):
+        outcomes.update(pass_base_success.keys())
 
-def refresh_allowed_sets() -> None:
-    """Recompute allowed keys after era parameters change."""
-    global ALLOWED_OFF_ACTIONS, ALLOWED_DEF_ACTIONS, ALLOWED_OUTCOMES
-    ALLOWED_OFF_ACTIONS = _collect_allowed_off_actions()
-    ALLOWED_DEF_ACTIONS = _collect_allowed_def_actions()
-    ALLOWED_OUTCOMES = _collect_allowed_outcomes()
-
-refresh_allowed_sets()
+    return AllowedSets(
+        offense_actions=offense_actions,
+        defense_actions=defense_actions,
+        outcomes=outcomes,
+        offense_schemes=offense_schemes,
+        defense_schemes=defense_schemes,
+    )
 
 
 def _clamp_mult(v: float, cfg: ValidationConfig) -> float:
@@ -186,41 +190,52 @@ def _sanitize_mult_dict(
 
 def _sanitize_outcome_mult_dict(
     mults: Dict[str, Any],
+    allowed_outcomes: set[str],
     cfg: ValidationConfig,
     report: ValidationReport,
     path: str,
 ) -> Dict[str, float]:
-    return _sanitize_mult_dict(mults, ALLOWED_OUTCOMES, cfg, report, path)
+    return _sanitize_mult_dict(mults, allowed_outcomes, cfg, report, path)
 
 
 def _sanitize_nested_outcome_by_action(
     nested: Dict[str, Any],
+    allowed_actions: set[str],
+    allowed_outcomes: set[str],
     cfg: ValidationConfig,
     report: ValidationReport,
     path: str,
 ) -> Dict[str, Dict[str, float]]:
     out: Dict[str, Dict[str, float]] = {}
     for act, sub in (nested or {}).items():
-        if act not in ALLOWED_OFF_ACTIONS:
+        if act not in allowed_actions:
             report.warn(f"{path}: unknown action '{act}' ignored")
             continue
-        if not isinstance(sub, dict):
+        if not isinstance(sub, Mapping):
             msg = f"{path}.{act}: expected dict, got {type(sub).__name__}"
             if cfg.strict:
                 report.error(msg)
             else:
                 report.warn(msg + " (ignored)")
             continue
-        clean = _sanitize_outcome_mult_dict(sub, cfg, report, f"{path}.{act}")
+        clean = _sanitize_outcome_mult_dict(sub, allowed_outcomes, cfg, report, f"{path}.{act}")
         if clean:
             out[act] = clean
     return out
 
 
-def sanitize_tactics_config(tac: TacticsConfig, cfg: ValidationConfig, report: ValidationReport, label: str) -> None:
+def sanitize_tactics_config(
+    tac: TacticsConfig,
+    cfg: ValidationConfig,
+    report: ValidationReport,
+    label: str,
+    game_cfg: "GameConfig",
+) -> None:
     """Mutates tactics in-place: clamps all UI knobs and ignores unknown keys."""
 
-    if tac.offense_scheme not in OFF_SCHEME_ACTION_WEIGHTS:
+    allowed = build_allowed_sets(game_cfg)
+
+    if tac.offense_scheme not in allowed.offense_schemes:
         msg = f"{label}.offense_scheme: unknown scheme '{tac.offense_scheme}'"
         if cfg.strict:
             report.error(msg)
@@ -235,7 +250,7 @@ def sanitize_tactics_config(tac: TacticsConfig, cfg: ValidationConfig, report: V
             report.warn(msg + " (fallback to Spread_HeavyPnR)")
             tac.offense_scheme = "Spread_HeavyPnR"
 
-    if tac.defense_scheme not in DEF_SCHEME_ACTION_WEIGHTS:
+    if tac.defense_scheme not in allowed.defense_schemes:
         msg = f"{label}.defense_scheme: unknown scheme '{tac.defense_scheme}'"
         if cfg.strict:
             report.error(msg)
@@ -261,15 +276,59 @@ def sanitize_tactics_config(tac: TacticsConfig, cfg: ValidationConfig, report: V
         setattr(tac, attr, vv)
 
     # Offense multipliers
-    tac.action_weight_mult = _sanitize_mult_dict(tac.action_weight_mult, ALLOWED_OFF_ACTIONS, cfg, report, f"{label}.action_weight_mult")
-    tac.outcome_global_mult = _sanitize_outcome_mult_dict(tac.outcome_global_mult, cfg, report, f"{label}.outcome_global_mult")
-    tac.outcome_by_action_mult = _sanitize_nested_outcome_by_action(tac.outcome_by_action_mult, cfg, report, f"{label}.outcome_by_action_mult")
+    tac.action_weight_mult = _sanitize_mult_dict(
+        tac.action_weight_mult,
+        allowed.offense_actions,
+        cfg,
+        report,
+        f"{label}.action_weight_mult",
+    )
+    tac.outcome_global_mult = _sanitize_outcome_mult_dict(
+        tac.outcome_global_mult,
+        allowed.outcomes,
+        cfg,
+        report,
+        f"{label}.outcome_global_mult",
+    )
+    tac.outcome_by_action_mult = _sanitize_nested_outcome_by_action(
+        tac.outcome_by_action_mult,
+        allowed.offense_actions,
+        allowed.outcomes,
+        cfg,
+        report,
+        f"{label}.outcome_by_action_mult",
+    )
 
     # Defense multipliers
-    tac.def_action_weight_mult = _sanitize_mult_dict(tac.def_action_weight_mult, ALLOWED_DEF_ACTIONS, cfg, report, f"{label}.def_action_weight_mult")
-    tac.opp_action_weight_mult = _sanitize_mult_dict(getattr(tac, "opp_action_weight_mult", {}), ALLOWED_OFF_ACTIONS, cfg, report, f"{label}.opp_action_weight_mult")
-    tac.opp_outcome_global_mult = _sanitize_outcome_mult_dict(tac.opp_outcome_global_mult, cfg, report, f"{label}.opp_outcome_global_mult")
-    tac.opp_outcome_by_action_mult = _sanitize_nested_outcome_by_action(tac.opp_outcome_by_action_mult, cfg, report, f"{label}.opp_outcome_by_action_mult")
+    tac.def_action_weight_mult = _sanitize_mult_dict(
+        tac.def_action_weight_mult,
+        allowed.defense_actions,
+        cfg,
+        report,
+        f"{label}.def_action_weight_mult",
+    )
+    tac.opp_action_weight_mult = _sanitize_mult_dict(
+        getattr(tac, "opp_action_weight_mult", {}),
+        allowed.offense_actions,
+        cfg,
+        report,
+        f"{label}.opp_action_weight_mult",
+    )
+    tac.opp_outcome_global_mult = _sanitize_outcome_mult_dict(
+        tac.opp_outcome_global_mult,
+        allowed.outcomes,
+        cfg,
+        report,
+        f"{label}.opp_outcome_global_mult",
+    )
+    tac.opp_outcome_by_action_mult = _sanitize_nested_outcome_by_action(
+        tac.opp_outcome_by_action_mult,
+        allowed.offense_actions,
+        allowed.outcomes,
+        cfg,
+        report,
+        f"{label}.opp_outcome_by_action_mult",
+    )
 
     # Context values (some are multipliers, some are special knobs)
     if tac.context is None:
@@ -349,7 +408,16 @@ def sanitize_player_derived(p: Player, cfg: ValidationConfig, report: Validation
             report.error(msg)
 
 
-def validate_and_sanitize_team(team: TeamState, cfg: ValidationConfig, report: ValidationReport, label: str) -> None:
+def validate_and_sanitize_team(
+    team: TeamState,
+    cfg: ValidationConfig,
+    report: ValidationReport,
+    label: str,
+    game_cfg: Optional["GameConfig"] = None,
+) -> None:
+    if game_cfg is None:
+        report.error(f"{label}: game_cfg missing for validation")
+        return
     # Lineup sanity
     if not isinstance(team.lineup, list) or len(team.lineup) == 0:
         report.error(f"{label}: lineup missing")
@@ -390,4 +458,4 @@ def validate_and_sanitize_team(team: TeamState, cfg: ValidationConfig, report: V
     if team.tactics is None:
         report.error(f"{label}: tactics missing")
         return
-    sanitize_tactics_config(team.tactics, cfg, report, f"{label}.tactics")
+    sanitize_tactics_config(team.tactics, cfg, report, f"{label}.tactics", game_cfg=game_cfg)

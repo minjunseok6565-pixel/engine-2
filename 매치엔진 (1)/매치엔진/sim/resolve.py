@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import random
 import math
-from typing import Any, Dict, Optional, Tuple
+from collections.abc import Mapping
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .builders import get_action_base
 from .core import clamp, dot_profile, sigmoid
 from .defense import team_def_snapshot
-from .era import DEFAULT_PROB_MODEL, ERA_PROB_MODEL
+from .era import DEFAULT_PROB_MODEL
 from .participants import (
     choose_assister_deterministic,
     choose_creator_for_pulloff,
@@ -23,17 +24,15 @@ from .participants import (
     choose_drb_rebounder as _choose_drb_rebounder,
 )
 from .prob import (
-    PASS_BASE_SUCCESS_MULT,
-    SHOT_BASE_3,
-    SHOT_BASE_MID,
-    SHOT_BASE_RIM,
     _shot_kind_from_outcome,
     _team_variance_mult,
     prob_from_scores,
 )
-from .profiles import OUTCOME_PROFILES, PASS_BASE_SUCCESS, SHOT_BASE, CORNER3_PROB_BY_ACTION_BASE
+from .profiles import OUTCOME_PROFILES, CORNER3_PROB_BY_ACTION_BASE
 from .models import GameState, Player, TeamState
 
+if TYPE_CHECKING:
+    from config.game_config import GameConfig
 
 def _pick_default_actor(offense: TeamState) -> Player:
     """12-role first, then best passer. Used when an outcome has no specific participant chooser."""
@@ -42,16 +41,19 @@ def _pick_default_actor(offense: TeamState) -> Player:
 from . import quality
 from .def_role_players import get_or_build_def_role_players, engine_get_stat
 
-ORB_BASE = 1.0
-TO_BASE = 1.0
-FOUL_BASE = 1.0
+def _knob_mult(game_cfg: "GameConfig", key: str, default: float = 1.0) -> float:
+    knobs = game_cfg.knobs if isinstance(game_cfg.knobs, Mapping) else {}
+    try:
+        return float(knobs.get(key, default))
+    except Exception:
+        return float(default)
 
 # ------------------------------------------------------------
 # Fouled-shot contact penalty (reduces and-ones, increases 2FT trips)
 #
-# Bucketed defaults (can override via ctx or ERA_PROB_MODEL):
+# Bucketed defaults (can override via ctx or prob_model):
 #   ctx["foul_contact_pmake_mult_hard"] / ["_normal"] / ["_soft"]
-#   ERA_PROB_MODEL["foul_contact_pmake_mult_hard"] / ...
+#   prob_model["foul_contact_pmake_mult_hard"] / ...
 # ------------------------------------------------------------
 CONTACT_PENALTY_MULT = {
     "hard":   0.22,  # SHOT_RIM_CONTACT, SHOT_POST
@@ -73,8 +75,14 @@ FOUL_DRAW_CONTACT_BUCKET = {
 # Rebound / Free throws
 # -------------------------
 
-def resolve_free_throws(rng: random.Random, shooter: Player, n: int, team: TeamState) -> Dict[str, Any]:
-    pm = ERA_PROB_MODEL if isinstance(ERA_PROB_MODEL, dict) else DEFAULT_PROB_MODEL
+def resolve_free_throws(
+    rng: random.Random,
+    shooter: Player,
+    n: int,
+    team: TeamState,
+    game_cfg: "GameConfig",
+) -> Dict[str, Any]:
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
     ft = shooter.get("SHOT_FT")
     p = clamp(
         float(pm.get("ft_base", 0.45)) + (ft / 100.0) * float(pm.get("ft_range", 0.47)),
@@ -98,15 +106,30 @@ def resolve_free_throws(rng: random.Random, shooter: Player, n: int, team: TeamS
             ftm += 1
     return {"fta": fta, "ftm": ftm, "last_made": last_made, "p_ft": float(p)}
 
-def rebound_orb_probability(offense: TeamState, defense: TeamState, orb_mult: float, drb_mult: float) -> float:
+def rebound_orb_probability(
+    offense: TeamState,
+    defense: TeamState,
+    orb_mult: float,
+    drb_mult: float,
+    game_cfg: "GameConfig",
+) -> float:
     off_players = offense.on_court_players()
     def_players = defense.on_court_players()
     off_orb = sum(p.get("REB_OR") for p in off_players) / max(len(off_players), 1)
     def_drb = sum(p.get("REB_DR") for p in def_players) / max(len(def_players), 1)
     off_orb *= orb_mult
     def_drb *= drb_mult
-    base = float(ERA_PROB_MODEL.get('orb_base', 0.26)) * float(ORB_BASE)
-    return prob_from_scores(None, base, off_orb, def_drb, kind='rebound', variance_mult=1.0)
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
+    base = float(pm.get("orb_base", 0.26)) * _knob_mult(game_cfg, "orb_base_mult", 1.0)
+    return prob_from_scores(
+        None,
+        base,
+        off_orb,
+        def_drb,
+        kind="rebound",
+        variance_mult=1.0,
+        game_cfg=game_cfg,
+    )
 
 def choose_orb_rebounder(rng: random.Random, offense: TeamState) -> Player:
     """Compatibility wrapper: rebounder selection lives in participants."""
@@ -140,13 +163,18 @@ def shot_zone_from_outcome(outcome: str) -> Optional[str]:
     return None
 
 
-def shot_zone_detail_from_outcome(outcome: str, action: str, rng: Optional[random.Random] = None) -> Optional[str]:
+def shot_zone_detail_from_outcome(
+    outcome: str,
+    action: str,
+    game_cfg: "GameConfig",
+    rng: Optional[random.Random] = None,
+) -> Optional[str]:
     """Map outcome -> NBA shot-chart zone (detail).
 
     For 3PA, we sample corner vs ATB using a *base-action* probability table so
     we don't deterministically over-produce corner 3s.
     """
-    base_action = get_action_base(action)
+    base_action = get_action_base(action, game_cfg)
 
     if outcome in ("SHOT_RIM_LAYUP", "SHOT_RIM_DUNK", "SHOT_RIM_CONTACT"):
         return "Restricted_Area"
@@ -181,12 +209,15 @@ def resolve_outcome(
     def_action: str,
     ctx: Optional[Dict[str, Any]] = None,
     game_state: Optional[GameState] = None,
+    game_cfg: Optional["GameConfig"] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     # count outcome
     offense.outcome_counts[outcome] = offense.outcome_counts.get(outcome, 0) + 1
 
     if ctx is None:
         ctx = {}
+    if game_cfg is None:
+        raise ValueError("resolve_outcome requires game_cfg")
 
     off_team_key = str(ctx.get("off_team_key") or "")
     def_team_key = str(ctx.get("def_team_key") or "")
@@ -238,13 +269,13 @@ def resolve_outcome(
 
     # Prob model / tuning knobs (ctx can override per-run)
     pm = ctx.get("prob_model")
-    if not isinstance(pm, dict):
-        pm = ERA_PROB_MODEL if isinstance(ERA_PROB_MODEL, dict) else DEFAULT_PROB_MODEL
+    if not isinstance(pm, Mapping):
+        pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
 
     # shot_diet participant bias (optional)
     style = ctx.get("shot_diet_style")
 
-    base_action = get_action_base(action)
+    base_action = get_action_base(action, game_cfg)
     def_snap = team_def_snapshot(defense)
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
@@ -277,7 +308,7 @@ def resolve_outcome(
     else:
         actor = _pick_default_actor(offense)
 
-    variance_mult = _team_variance_mult(offense) * float(ctx.get("variance_mult", 1.0))
+    variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
     # compute scores
     off_vals = {k: actor.get(k) for k in prof["offense"].keys()}
@@ -340,14 +371,15 @@ def resolve_outcome(
         shot_dbg = {}
         if debug_q:
             shot_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
-        base_p = SHOT_BASE.get(outcome, 0.45)
+        shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, Mapping) else {}
+        base_p = shot_base.get(outcome, 0.45)
         kind = _shot_kind_from_outcome(outcome)
         if kind == "shot_rim":
-            base_p *= float(SHOT_BASE_RIM)
+            base_p *= _knob_mult(game_cfg, "shot_base_rim_mult", 1.0)
         elif kind == "shot_mid":
-            base_p *= float(SHOT_BASE_MID)
+            base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
         else:
-            base_p *= float(SHOT_BASE_3)
+            base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
         p_make = prob_from_scores(
             rng,
             base_p,
@@ -357,6 +389,7 @@ def resolve_outcome(
             variance_mult=variance_mult,
             logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
             fatigue_logit_delta=fatigue_logit_delta,
+            game_cfg=game_cfg,
         )
 
         pts = outcome_points(outcome)
@@ -365,7 +398,7 @@ def resolve_outcome(
         zone = shot_zone_from_outcome(outcome)
         if zone:
             offense.shot_zones[zone] = offense.shot_zones.get(zone, 0) + 1
-        zone_detail = shot_zone_detail_from_outcome(outcome, action, rng)
+        zone_detail = shot_zone_detail_from_outcome(outcome, action, game_cfg, rng)
         if zone_detail:
             offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
             offense.shot_zone_detail[zone_detail]["FGA"] += 1
@@ -390,7 +423,7 @@ def resolve_outcome(
             assisted = False
             assister_pid = None
             pass_chain_val = ctx.get("pass_chain", pass_chain)
-            base_action = get_action_base(action)
+            base_action = get_action_base(action, game_cfg)
 
             if "_CS" in outcome:
                 assisted = True
@@ -456,7 +489,8 @@ def resolve_outcome(
             })
 
     if is_pass(outcome):
-        base_s = PASS_BASE_SUCCESS.get(outcome, 0.90) * float(PASS_BASE_SUCCESS_MULT)
+        pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
+        base_s = pass_base.get(outcome, 0.90) * _knob_mult(game_cfg, "pass_base_success_mult", 1.0)
 
         # PASS completion (offense vs defense) - this preserves passer skill influence.
         p_ok = prob_from_scores(
@@ -467,6 +501,7 @@ def resolve_outcome(
             kind="pass",
             variance_mult=variance_mult,
             logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in),
+            game_cfg=game_cfg,
         )
 
         # PASS quality (defensive scheme structure + defensive role stats)
@@ -716,14 +751,15 @@ def resolve_outcome(
             if debug_q:
                 foul_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
 
-            base_p = SHOT_BASE.get(shot_key, 0.45)
+            shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, Mapping) else {}
+            base_p = shot_base.get(shot_key, 0.45)
             kind = _shot_kind_from_outcome(shot_key)
             if kind == "shot_rim":
-                base_p *= float(SHOT_BASE_RIM)
+                base_p *= _knob_mult(game_cfg, "shot_base_rim_mult", 1.0)
             elif kind == "shot_mid":
-                base_p *= float(SHOT_BASE_MID)
+                base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
             else:
-                base_p *= float(SHOT_BASE_3)
+                base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
 
             p_make = prob_from_scores(
                 rng,
@@ -734,6 +770,7 @@ def resolve_outcome(
                 variance_mult=variance_mult,
                 logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
                 fatigue_logit_delta=fatigue_logit_delta,
+                game_cfg=game_cfg,
             )
 
             # Apply contact penalty ONLY for fouled shots.
@@ -755,7 +792,7 @@ def resolve_outcome(
             # - MISSED fouled shot -> no FGA/3PA is recorded.
             # - MADE fouled shot   -> counts as FGA (+3PA if it was a 3), and can be an and-one.
             shot_zone = shot_zone_from_outcome(shot_key)
-            zone_detail = shot_zone_detail_from_outcome(shot_key, action, rng)
+            zone_detail = shot_zone_detail_from_outcome(shot_key, action, game_cfg, rng)
 
             shot_made = rng.random() < p_make
             if shot_made:
@@ -812,7 +849,7 @@ def resolve_outcome(
             # bonus free throws, no shot attempt
             nfts = 2
 
-        ft_res = resolve_free_throws(rng, actor, nfts, offense)
+        ft_res = resolve_free_throws(rng, actor, nfts, offense, game_cfg=game_cfg)
 
         if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
             if game_state is not None:
@@ -828,9 +865,9 @@ def resolve_outcome(
             "and_one": and_one,
             "nfts": int(nfts),
         }
-        if isinstance(ft_res, dict):
+        if isinstance(ft_res, Mapping):
             payload.update(ft_res)
-        if isinstance(foul_dbg, dict) and foul_dbg:
+        if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
         return "FOUL_FT", _with_team(payload, include_fouler=True)
 

@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import importlib
-import warnings
 
 from .profiles import (
     ACTION_ALIASES,
@@ -19,42 +17,6 @@ from .profiles import (
     PASS_BASE_SUCCESS,
     SHOT_BASE,
 )
-# -------------------------
-# Tunable update safety
-# -------------------------
-# apply_tunable_updates() has a special hook that scales shot-related outcome priors.
-# If applied repeatedly by multiplying in-place, the effect accumulates unintentionally.
-# We keep an unscaled base snapshot and re-apply the *current* multiplier idempotently.
-
-_BASE_ACTION_OUTCOME_PRIORS: Dict[str, Any] = copy.deepcopy(ACTION_OUTCOME_PRIORS)
-_SHOT_PRIOR_SCALE: float = 1.0
-
-
-def _refresh_base_action_outcome_priors_snapshot() -> None:
-    global _BASE_ACTION_OUTCOME_PRIORS
-    _BASE_ACTION_OUTCOME_PRIORS = copy.deepcopy(ACTION_OUTCOME_PRIORS)
-
-
-def _restore_action_outcome_priors_to_base() -> None:
-    # Do NOT rebind dict globals; keep references stable.
-    ACTION_OUTCOME_PRIORS.clear()
-    ACTION_OUTCOME_PRIORS.update(copy.deepcopy(_BASE_ACTION_OUTCOME_PRIORS))
-
-
-def _apply_shot_prior_scale(mult: float) -> None:
-    # Scale only shot outcomes inside each action's outcome prior dict.
-    for act, pri in ACTION_OUTCOME_PRIORS.items():
-        if not isinstance(pri, dict):
-            continue
-        for o in list(pri.keys()):
-            if isinstance(o, str) and o.startswith("SHOT_"):
-                try:
-                    pri[o] = float(pri.get(o, 0.0)) * float(mult)
-                except Exception:
-                    pri[o] = 0.0
-
-
-
 # -------------------------
 # Era / Parameter externalization (0-1)
 # -------------------------
@@ -83,7 +45,6 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "ft_max": 0.95,
 }
 
-ERA_PROB_MODEL: Dict[str, float] = dict(DEFAULT_PROB_MODEL)
 
 # Logistic parameters by outcome kind (2-1, 2-2)
 # NOTE: 'scale' and 'sensitivity' are redundant (sensitivity ~= 1/scale). We keep both for readability.
@@ -116,11 +77,8 @@ DEFAULT_VARIANCE_PARAMS: Dict[str, Any] = {
     "team_mult_hi": 1.55,
 }
 
-ERA_LOGISTIC_PARAMS: Dict[str, Dict[str, float]] = dict(DEFAULT_LOGISTIC_PARAMS)
-ERA_VARIANCE_PARAMS: Dict[str, Any] = copy.deepcopy(DEFAULT_VARIANCE_PARAMS)
 
 DEFAULT_ROLE_FIT = {"default_strength": 0.65}
-ERA_ROLE_FIT: Dict[str, Any] = copy.deepcopy(DEFAULT_ROLE_FIT)
 
 MVP_RULES = {
     "quarters": 4,
@@ -346,17 +304,6 @@ ERA_TARGETS: Dict[str, Dict[str, Any]] = {
     }
 }
 
-TUNABLE_REGISTRY: Dict[str, Tuple[str, str]] = {
-    "SHOT_BASE_RIM": ("match_engine.prob", "SHOT_BASE_RIM"),
-    "SHOT_BASE_MID": ("match_engine.prob", "SHOT_BASE_MID"),
-    "SHOT_BASE_3": ("match_engine.prob", "SHOT_BASE_3"),
-    "PASS_BASE_SUCCESS_MULT": ("match_engine.prob", "PASS_BASE_SUCCESS_MULT"),
-    "ORB_BASE": ("match_engine.resolve", "ORB_BASE"),
-    "TO_BASE": ("match_engine.resolve", "TO_BASE"),
-    "FOUL_BASE": ("match_engine.resolve", "FOUL_BASE"),
-}
-
-
 # Snapshot built-in defaults (used as fallback if era json is missing keys)
 DEFAULT_ERA: Dict[str, Any] = {
     "name": "builtin_default",
@@ -382,11 +329,6 @@ DEFAULT_ERA: Dict[str, Any] = {
     "defense_scheme_mult": copy.deepcopy(DEFENSE_SCHEME_MULT),
 }
 
-_ERA_CACHE: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_ERA_NAME: str = "builtin_default"
-_ACTIVE_ERA_VERSION: str = "1.0"
-
-
 def get_mvp_rules() -> Dict[str, Any]:
     return copy.deepcopy(MVP_RULES)
 
@@ -397,64 +339,6 @@ def get_defense_meta_params() -> Dict[str, Any]:
 
 def get_era_targets(name: str) -> Dict[str, Any]:
     return copy.deepcopy(ERA_TARGETS.get(name, ERA_TARGETS.get("era_modern_nbaish_v1", {})))
-
-
-def _import_attr(mod_path: str, attr: str):
-    mod = importlib.import_module(mod_path)
-    return mod, getattr(mod, attr)
-
-
-def snapshot_tunables() -> Dict[str, Any]:
-    snap: Dict[str, Any] = {}
-    for key, (mod_path, attr) in TUNABLE_REGISTRY.items():
-        try:
-            _, val = _import_attr(mod_path, attr)
-            snap[key] = copy.deepcopy(val)
-        except Exception:
-            snap[key] = None
-    return snap
-
-
-def restore_tunables(snapshot: Dict[str, Any]) -> None:
-    for key, val in (snapshot or {}).items():
-        target = TUNABLE_REGISTRY.get(key)
-        if not target:
-            continue
-        mod_path, attr = target
-        try:
-            mod = importlib.import_module(mod_path)
-            setattr(mod, attr, copy.deepcopy(val))
-        except Exception:
-            continue
-
-
-def apply_tunable_updates(updates: Dict[str, Any]) -> None:
-    updates = updates or {}
-    for key, delta in updates.items():
-        target = TUNABLE_REGISTRY.get(key)
-        if not target:
-            continue
-        mod_path, attr = target
-        try:
-            mod = importlib.import_module(mod_path)
-            cur = getattr(mod, attr)
-            setattr(mod, attr, delta if not isinstance(cur, (int, float)) else float(delta))
-        except Exception:
-            continue
-    
-    # special hook: allow global shot prior scaling (idempotent; fatigue can change but priors should not accumulate)
-    if "ACTION_PRIOR_SHOT_SCALE" in updates:
-        global _SHOT_PRIOR_SCALE
-        try:
-            mult = float(updates.get("ACTION_PRIOR_SHOT_SCALE", 1.0))
-            _SHOT_PRIOR_SCALE = mult
-            _restore_action_outcome_priors_to_base()
-            _apply_shot_prior_scale(_SHOT_PRIOR_SCALE)
-        except Exception as e:
-            warnings.warn(
-                f"apply_tunable_updates: failed to apply ACTION_PRIOR_SHOT_SCALE ({updates.get('ACTION_PRIOR_SHOT_SCALE')}); {type(e).__name__}: {e}",
-                RuntimeWarning,
-            )
 
 
 def _resolve_era_path(era_name: str) -> Optional[str]:
@@ -478,13 +362,6 @@ def _resolve_era_path(era_name: str) -> Optional[str]:
     return None
 
 
-def _merge_dict(dst: Dict[str, Any], src2: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(dst)
-    for k, v in (src2 or {}).items():
-        out[k] = v
-    return out
-
-
 def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
     """Load an era config (dict) + return (config, warnings, errors)."""
     warnings: List[str] = []
@@ -495,15 +372,11 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
         era_name = str(raw.get("name") or "custom")
     else:
         era_name = str(era or "default")
-        if era_name in _ERA_CACHE:
-            return _ERA_CACHE[era_name], [], []
-
         path = _resolve_era_path("default" if era_name == "default" else era_name)
         if path is None:
             warnings.append(f"era file not found for '{era_name}', using built-in defaults")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
         try:
@@ -513,14 +386,12 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
             errors.append(f"failed to read era json ({path}): {e}")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
         if not isinstance(raw, dict):
             errors.append(f"era json root must be an object/dict (got {type(raw).__name__})")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
     cfg, w2, e2 = validate_and_fill_era_dict(raw)
@@ -530,7 +401,6 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
     cfg["name"] = str(raw.get("name") or era_name)
     cfg["version"] = str(raw.get("version") or cfg.get("version") or "1.0")
 
-    _ERA_CACHE[cfg["name"]] = cfg
     return cfg, warnings, errors
 
 
@@ -571,99 +441,3 @@ def validate_and_fill_era_dict(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Lis
             warnings.append(f"knobs.{kk}: expected number, got {type(vv).__name__}")
 
     return cfg, warnings, errors
-
-
-def apply_era_config(era_cfg: Dict[str, Any]) -> None:
-    """Apply an era config to global tuning parameters.
-
-    IMPORTANT:
-    - Do NOT rebind dict globals (e.g., SHOT_BASE = {...}) because other modules may already
-      hold references imported from profiles/era.
-    - Always mutate dicts in-place via clear()/update().
-    """
-    global _ACTIVE_ERA_NAME, _ACTIVE_ERA_VERSION
-
-    if not isinstance(era_cfg, dict):
-        return
-
-    # ---- profiles.py에서 import된 dict들 (반드시 in-place로 갱신) ----
-    sb = era_cfg.get("shot_base")
-    if isinstance(sb, dict):
-        SHOT_BASE.clear()
-        SHOT_BASE.update(dict(sb))
-
-    pb = era_cfg.get("pass_base_success")
-    if isinstance(pb, dict):
-        PASS_BASE_SUCCESS.clear()
-        PASS_BASE_SUCCESS.update(dict(pb))
-
-    aop = era_cfg.get("action_outcome_priors")
-    if isinstance(aop, dict):
-        ACTION_OUTCOME_PRIORS.clear()
-        ACTION_OUTCOME_PRIORS.update(copy.deepcopy(aop))
-        _refresh_base_action_outcome_priors_snapshot()
-        if _SHOT_PRIOR_SCALE != 1.0:
-            _restore_action_outcome_priors_to_base()
-            _apply_shot_prior_scale(_SHOT_PRIOR_SCALE)
-
-    aa = era_cfg.get("action_aliases")
-    if isinstance(aa, dict):
-        ACTION_ALIASES.clear()
-        ACTION_ALIASES.update(dict(aa))
-
-    offw = era_cfg.get("off_scheme_action_weights")
-    if isinstance(offw, dict):
-        OFF_SCHEME_ACTION_WEIGHTS.clear()
-        OFF_SCHEME_ACTION_WEIGHTS.update(copy.deepcopy(offw))
-
-    defw = era_cfg.get("def_scheme_action_weights")
-    if isinstance(defw, dict):
-        DEF_SCHEME_ACTION_WEIGHTS.clear()
-        DEF_SCHEME_ACTION_WEIGHTS.update(copy.deepcopy(defw))
-
-    osm = era_cfg.get("offense_scheme_mult")
-    if isinstance(osm, dict):
-        OFFENSE_SCHEME_MULT.clear()
-        OFFENSE_SCHEME_MULT.update(copy.deepcopy(osm))
-
-    dsm = era_cfg.get("defense_scheme_mult")
-    if isinstance(dsm, dict):
-        DEFENSE_SCHEME_MULT.clear()
-        DEFENSE_SCHEME_MULT.update(copy.deepcopy(dsm))
-
-    # ---- era.py 내부 dict들 (다른 모듈이 from .era import ... 로 잡고 있을 수 있으니 in-place) ----
-    pm = era_cfg.get("prob_model")
-    if isinstance(pm, dict):
-        merged = _merge_dict(DEFAULT_PROB_MODEL, pm)
-        ERA_PROB_MODEL.clear()
-        ERA_PROB_MODEL.update(merged)
-
-    lp = era_cfg.get("logistic_params")
-    if isinstance(lp, dict):
-        ERA_LOGISTIC_PARAMS.clear()
-        ERA_LOGISTIC_PARAMS.update(copy.deepcopy(lp))
-
-    vp = era_cfg.get("variance_params")
-    if isinstance(vp, dict):
-        ERA_VARIANCE_PARAMS.clear()
-        ERA_VARIANCE_PARAMS.update(copy.deepcopy(vp))
-
-    rf = era_cfg.get("role_fit")
-    if isinstance(rf, dict):
-        merged = _merge_dict(DEFAULT_ROLE_FIT, rf)
-        ERA_ROLE_FIT.clear()
-        ERA_ROLE_FIT.update(merged)
-
-    _ACTIVE_ERA_NAME = str(era_cfg.get("name") or "unknown")
-    _ACTIVE_ERA_VERSION = str(era_cfg.get("version") or "1.0")
-
-    # ---- validation.py의 allowed sets는 캐시라서 반드시 갱신 ----
-    try:
-        from .validation import refresh_allowed_sets
-        refresh_allowed_sets()
-    except Exception as e:
-        # Do not fail era application, but also do not silently ignore errors.
-        warnings.warn(
-            f"apply_era_config: refresh_allowed_sets() failed; {type(e).__name__}: {e}",
-            RuntimeWarning,
-        )

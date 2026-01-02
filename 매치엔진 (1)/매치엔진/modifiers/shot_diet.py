@@ -15,7 +15,7 @@ Design principles (as agreed):
 - Lineup is "feasibility": outcome priors changes are stronger (larger alpha/clamp).
 - Initiation is handler-centric (primary/secondary with usage softmax), so a single elite guard
   can drive action frequency without being washed out by lineup averages.
-- Uses ACTION_ALIASES via get_action_base() to map concrete actions to base actions.
+- Uses action alias mappings passed into get_action_base() to map concrete actions to base actions.
 
 Integration conditions (so you can use this file "as-is" with a UI-driven role system):
 - TeamState.roles must be a dict[str, str] mapping role_fit role names -> on-court player pid strings.
@@ -41,7 +41,6 @@ import math
 
 from .core import clamp
 from .models import Player, TeamState
-from .profiles import ACTION_ALIASES
 
 # -------------------------
 # Data imports (tables moved to shot_diet_data.py to keep this module logic-focused)
@@ -174,9 +173,10 @@ def _energy_bucket(val: Any) -> float:
 # Utilities
 # -------------------------
 
-def get_action_base(action: str) -> str:
-    """Map concrete action to base action using ACTION_ALIASES."""
-    return ACTION_ALIASES.get(action, action)
+def get_action_base(action: str, action_aliases: Optional[Dict[str, str]] = None) -> str:
+    """Map concrete action to base action using provided aliases."""
+    aliases = action_aliases or {}
+    return aliases.get(action, action)
 
 
 def _get01(p: Player, key: str) -> float:
@@ -727,9 +727,14 @@ def get_outcome_multipliers(style: ShotDietStyle, tactic_name: str, base_action:
     return out
 
 
-def get_action_multiplier_for_action(style: ShotDietStyle, tactic_name: str, action: str) -> float:
+def get_action_multiplier_for_action(
+    style: ShotDietStyle,
+    tactic_name: str,
+    action: str,
+    action_aliases: Optional[Dict[str, str]] = None,
+) -> float:
     """Convenience: multiplier for a concrete action (handles alias -> base)."""
-    base = get_action_base(action)
+    base = get_action_base(action, action_aliases)
     mults = get_action_multipliers(style, tactic_name)
     return mults.get(base, 1.0)
 

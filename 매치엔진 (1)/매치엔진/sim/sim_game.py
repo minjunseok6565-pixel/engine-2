@@ -14,10 +14,10 @@ from .models import GameState, TeamState
 from .validation import (
     ValidationConfig,
     ValidationReport,
-    sanitize_tactics_config,
     validate_and_sanitize_team,
 )
-from .era import apply_era_config, get_mvp_rules, load_era_config
+from config.game_config import build_game_config
+from .era import get_mvp_rules, load_era_config
 
 from .sim_clock import apply_dead_ball_cost
 from .sim_fatigue import _apply_break_recovery, _apply_fatigue_loss
@@ -246,19 +246,18 @@ def simulate_game(
     for e in era_errors:
         report.error(f"era[{era}]: {e}")
 
-    # Apply era tuning to engine globals BEFORE sanitizing tactics.
-    apply_era_config(era_cfg)
+    game_cfg = build_game_config(era_cfg)
 
     # If caller did not pass a custom ValidationConfig, adopt knob clamp bounds from era.
-    if validation is None and isinstance(era_cfg.get("knobs"), dict):
-        k = era_cfg.get("knobs", {})
+    if validation is None:
+        k = game_cfg.knobs
         if isinstance(k.get("mult_lo"), (int, float)):
             cfg.mult_lo = float(k["mult_lo"])
         if isinstance(k.get("mult_hi"), (int, float)):
             cfg.mult_hi = float(k["mult_hi"])
 
-    validate_and_sanitize_team(teamA, cfg, report, label=f"team[{teamA.name}]")
-    validate_and_sanitize_team(teamB, cfg, report, label=f"team[{teamB.name}]")
+    validate_and_sanitize_team(teamA, cfg, report, label=f"team[{teamA.name}]", game_cfg=game_cfg)
+    validate_and_sanitize_team(teamB, cfg, report, label=f"team[{teamB.name}]", game_cfg=game_cfg)
 
     if cfg.strict and report.errors:
         # Raise with a compact, actionable message (full list is also in report)
@@ -420,7 +419,7 @@ def simulate_game(
 
             # full shot clock starts after setup
             game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
-            pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx)
+            pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
 
             elapsed = max(start_clock - game_state.clock_sec, 0.0)
             _update_minutes(game_state, off_on_court, elapsed, offense, home)
@@ -514,7 +513,7 @@ def simulate_game(
         "meta": {
             "engine_version": ENGINE_VERSION,
             "era": era,
-            "era_version": str(globals().get("_ACTIVE_ERA_VERSION", "1.0")),
+            "era_version": str(game_cfg.era.get("version", "1.0")),
             "replay_token": replay_token,
             "overtime_periods": overtime_periods,
             "validation": report.to_dict(),

@@ -2,22 +2,18 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Dict, Optional
+from collections.abc import Mapping
+from typing import Dict, Optional, TYPE_CHECKING
 
 from .core import clamp, sigmoid
 from .era import (
     DEFAULT_LOGISTIC_PARAMS,
     DEFAULT_PROB_MODEL,
     DEFAULT_VARIANCE_PARAMS,
-    ERA_LOGISTIC_PARAMS,
-    ERA_PROB_MODEL,
-    ERA_VARIANCE_PARAMS,
 )
 
-SHOT_BASE_RIM = 1.0
-SHOT_BASE_MID = 1.0
-SHOT_BASE_3 = 1.0
-PASS_BASE_SUCCESS_MULT = 1.0
+if TYPE_CHECKING:
+    from config.game_config import GameConfig
 
 # -------------------------
 # Probability model
@@ -29,6 +25,7 @@ def prob_from_scores(
     off_score: float,
     def_score: float,
     *,
+    game_cfg: "GameConfig",
     kind: str = "default",
     variance_mult: float = 1.0,
     logit_delta: float = 0.0,
@@ -43,12 +40,14 @@ def prob_from_scores(
     - sensitivity: per-kind slope, externalized in the era file (logistic_params).
     - noise: optional variance knob (2-3). Uses logit-space Gaussian noise so the mean stays stable.
     """
-    pm = ERA_PROB_MODEL if isinstance(ERA_PROB_MODEL, dict) else DEFAULT_PROB_MODEL
+    if game_cfg is None:
+        raise ValueError("prob_from_scores requires game_cfg")
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
     base_p = clamp(float(base_p), float(pm.get("base_p_min", 0.02)), float(pm.get("base_p_max", 0.98)))
     base_logit = math.log(base_p / (1.0 - base_p))
 
     # ---- sensitivity (2-1, 2-2) ----
-    lp = ERA_LOGISTIC_PARAMS if isinstance(ERA_LOGISTIC_PARAMS, dict) else DEFAULT_LOGISTIC_PARAMS
+    lp = game_cfg.logistic_params if isinstance(game_cfg.logistic_params, Mapping) else DEFAULT_LOGISTIC_PARAMS
     spec = lp.get(kind) or lp.get("default") or {}
     sens = spec.get("sensitivity")
     scale = spec.get("scale")
@@ -71,9 +70,9 @@ def prob_from_scores(
     # ---- variance knob (2-3) ----
     noise = 0.0
     if rng is not None:
-        vp = ERA_VARIANCE_PARAMS if isinstance(ERA_VARIANCE_PARAMS, dict) else DEFAULT_VARIANCE_PARAMS
+        vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, Mapping) else DEFAULT_VARIANCE_PARAMS
         std = float(vp.get("logit_noise_std", 0.0))
-        kind_mult = float((vp.get("kind_mult") or {}).get(kind, 1.0)) if isinstance(vp.get("kind_mult"), dict) else 1.0
+        kind_mult = float((vp.get("kind_mult") or {}).get(kind, 1.0)) if isinstance(vp.get("kind_mult"), Mapping) else 1.0
         # team volatility multiplier (clamped)
         tlo, thi = 0.70, 1.40
         if isinstance(vp.get("team_mult_lo"), (int, float)):
@@ -99,8 +98,8 @@ def _shot_kind_from_outcome(outcome: str) -> str:
         return "shot_post"
     return "shot_rim"
 
-def _team_variance_mult(team: "TeamState") -> float:
-    vp = ERA_VARIANCE_PARAMS if isinstance(ERA_VARIANCE_PARAMS, dict) else DEFAULT_VARIANCE_PARAMS
+def _team_variance_mult(team: "TeamState", game_cfg: "GameConfig") -> float:
+    vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, Mapping) else DEFAULT_VARIANCE_PARAMS
     try:
         vm = float((team.tactics.context or {}).get("VARIANCE_MULT", 1.0))
     except Exception:
@@ -108,6 +107,3 @@ def _team_variance_mult(team: "TeamState") -> float:
     lo = float(vp.get("team_mult_lo", 0.70))
     hi = float(vp.get("team_mult_hi", 1.40))
     return clamp(vm, lo, hi)
-
-
-
