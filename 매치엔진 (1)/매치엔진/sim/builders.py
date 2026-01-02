@@ -156,6 +156,13 @@ def effective_scheme_multiplier(base_mult: float, strength: float) -> float:
     s = clamp(strength, 0.70, 1.40)
     return 1.0 + (float(base_mult) - 1.0) * s
 
+def _knob_mult(game_cfg: "GameConfig", key: str, default: float = 1.0) -> float:
+    knobs = game_cfg.knobs if isinstance(game_cfg.knobs, Mapping) else {}
+    try:
+        return float(knobs.get(key, default))
+    except Exception:
+        return float(default)
+
 def build_outcome_priors(
     action: str,
     off_tac: TacticsConfig,
@@ -218,21 +225,16 @@ def build_outcome_priors(
             if o.startswith("TO_") or o.startswith("RESET_"):
                 pri[o] = pri.get(o, 0.0) * mult
 
-    try:
-        from . import resolve as _resolve_mod  # lazy to avoid cycle
-
-        to_base = float(getattr(_resolve_mod, "TO_BASE", 1.0))
-        foul_base = float(getattr(_resolve_mod, "FOUL_BASE", 1.0))
-        if to_base != 1.0:
-            for o in list(pri.keys()):
-                if o.startswith("TO_"):
-                    pri[o] = pri.get(o, 0.0) * to_base
-        if foul_base != 1.0:
-            for o in list(pri.keys()):
-                if o.startswith("FOUL_"):
-                    pri[o] = pri.get(o, 0.0) * foul_base
-    except Exception:
-        pass
+    to_base = _knob_mult(game_cfg, "to_base_mult", 1.0)
+    foul_base = _knob_mult(game_cfg, "foul_base_mult", 1.0)
+    if to_base != 1.0:
+        for o in list(pri.keys()):
+            if o.startswith("TO_"):
+                pri[o] = pri.get(o, 0.0) * to_base
+    if foul_base != 1.0:
+        for o in list(pri.keys()):
+            if o.startswith("FOUL_"):
+                pri[o] = pri.get(o, 0.0) * foul_base
 
     meta = get_defense_meta_params()
     rules = meta.get("defense_meta_priors_rules", {})

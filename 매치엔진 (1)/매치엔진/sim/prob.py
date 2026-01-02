@@ -15,11 +15,6 @@ from .era import (
 if TYPE_CHECKING:
     from config.game_config import GameConfig
 
-SHOT_BASE_RIM = 1.0
-SHOT_BASE_MID = 1.0
-SHOT_BASE_3 = 1.0
-PASS_BASE_SUCCESS_MULT = 1.0
-
 # -------------------------
 # Probability model
 # -------------------------

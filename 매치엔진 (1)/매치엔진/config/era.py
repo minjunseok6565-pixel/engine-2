@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import importlib
-import warnings
 
 from .profiles import (
     ACTION_ALIASES,
@@ -19,42 +17,6 @@ from .profiles import (
     PASS_BASE_SUCCESS,
     SHOT_BASE,
 )
-# -------------------------
-# Tunable update safety
-# -------------------------
-# apply_tunable_updates() has a special hook that scales shot-related outcome priors.
-# If applied repeatedly by multiplying in-place, the effect accumulates unintentionally.
-# We keep an unscaled base snapshot and re-apply the *current* multiplier idempotently.
-
-_BASE_ACTION_OUTCOME_PRIORS: Dict[str, Any] = copy.deepcopy(ACTION_OUTCOME_PRIORS)
-_SHOT_PRIOR_SCALE: float = 1.0
-
-
-def _refresh_base_action_outcome_priors_snapshot() -> None:
-    global _BASE_ACTION_OUTCOME_PRIORS
-    _BASE_ACTION_OUTCOME_PRIORS = copy.deepcopy(ACTION_OUTCOME_PRIORS)
-
-
-def _restore_action_outcome_priors_to_base() -> None:
-    # Do NOT rebind dict globals; keep references stable.
-    ACTION_OUTCOME_PRIORS.clear()
-    ACTION_OUTCOME_PRIORS.update(copy.deepcopy(_BASE_ACTION_OUTCOME_PRIORS))
-
-
-def _apply_shot_prior_scale(mult: float) -> None:
-    # Scale only shot outcomes inside each action's outcome prior dict.
-    for act, pri in ACTION_OUTCOME_PRIORS.items():
-        if not isinstance(pri, dict):
-            continue
-        for o in list(pri.keys()):
-            if isinstance(o, str) and o.startswith("SHOT_"):
-                try:
-                    pri[o] = float(pri.get(o, 0.0)) * float(mult)
-                except Exception:
-                    pri[o] = 0.0
-
-
-
 # -------------------------
 # Era / Parameter externalization (0-1)
 # -------------------------
@@ -83,7 +45,6 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "ft_max": 0.95,
 }
 
-ERA_PROB_MODEL: Dict[str, float] = dict(DEFAULT_PROB_MODEL)
 
 # Logistic parameters by outcome kind (2-1, 2-2)
 # NOTE: 'scale' and 'sensitivity' are redundant (sensitivity ~= 1/scale). We keep both for readability.
@@ -116,11 +77,8 @@ DEFAULT_VARIANCE_PARAMS: Dict[str, Any] = {
     "team_mult_hi": 1.55,
 }
 
-ERA_LOGISTIC_PARAMS: Dict[str, Dict[str, float]] = dict(DEFAULT_LOGISTIC_PARAMS)
-ERA_VARIANCE_PARAMS: Dict[str, Any] = copy.deepcopy(DEFAULT_VARIANCE_PARAMS)
 
 DEFAULT_ROLE_FIT = {"default_strength": 0.65}
-ERA_ROLE_FIT: Dict[str, Any] = copy.deepcopy(DEFAULT_ROLE_FIT)
 
 MVP_RULES = {
     "quarters": 4,
@@ -346,17 +304,6 @@ ERA_TARGETS: Dict[str, Dict[str, Any]] = {
     }
 }
 
-TUNABLE_REGISTRY: Dict[str, Tuple[str, str]] = {
-    "SHOT_BASE_RIM": ("match_engine.prob", "SHOT_BASE_RIM"),
-    "SHOT_BASE_MID": ("match_engine.prob", "SHOT_BASE_MID"),
-    "SHOT_BASE_3": ("match_engine.prob", "SHOT_BASE_3"),
-    "PASS_BASE_SUCCESS_MULT": ("match_engine.prob", "PASS_BASE_SUCCESS_MULT"),
-    "ORB_BASE": ("match_engine.resolve", "ORB_BASE"),
-    "TO_BASE": ("match_engine.resolve", "TO_BASE"),
-    "FOUL_BASE": ("match_engine.resolve", "FOUL_BASE"),
-}
-
-
 # Snapshot built-in defaults (used as fallback if era json is missing keys)
 DEFAULT_ERA: Dict[str, Any] = {
     "name": "builtin_default",
@@ -394,64 +341,6 @@ def get_era_targets(name: str) -> Dict[str, Any]:
     return copy.deepcopy(ERA_TARGETS.get(name, ERA_TARGETS.get("era_modern_nbaish_v1", {})))
 
 
-def _import_attr(mod_path: str, attr: str):
-    mod = importlib.import_module(mod_path)
-    return mod, getattr(mod, attr)
-
-
-def snapshot_tunables() -> Dict[str, Any]:
-    snap: Dict[str, Any] = {}
-    for key, (mod_path, attr) in TUNABLE_REGISTRY.items():
-        try:
-            _, val = _import_attr(mod_path, attr)
-            snap[key] = copy.deepcopy(val)
-        except Exception:
-            snap[key] = None
-    return snap
-
-
-def restore_tunables(snapshot: Dict[str, Any]) -> None:
-    for key, val in (snapshot or {}).items():
-        target = TUNABLE_REGISTRY.get(key)
-        if not target:
-            continue
-        mod_path, attr = target
-        try:
-            mod = importlib.import_module(mod_path)
-            setattr(mod, attr, copy.deepcopy(val))
-        except Exception:
-            continue
-
-
-def apply_tunable_updates(updates: Dict[str, Any]) -> None:
-    updates = updates or {}
-    for key, delta in updates.items():
-        target = TUNABLE_REGISTRY.get(key)
-        if not target:
-            continue
-        mod_path, attr = target
-        try:
-            mod = importlib.import_module(mod_path)
-            cur = getattr(mod, attr)
-            setattr(mod, attr, delta if not isinstance(cur, (int, float)) else float(delta))
-        except Exception:
-            continue
-    
-    # special hook: allow global shot prior scaling (idempotent; fatigue can change but priors should not accumulate)
-    if "ACTION_PRIOR_SHOT_SCALE" in updates:
-        global _SHOT_PRIOR_SCALE
-        try:
-            mult = float(updates.get("ACTION_PRIOR_SHOT_SCALE", 1.0))
-            _SHOT_PRIOR_SCALE = mult
-            _restore_action_outcome_priors_to_base()
-            _apply_shot_prior_scale(_SHOT_PRIOR_SCALE)
-        except Exception as e:
-            warnings.warn(
-                f"apply_tunable_updates: failed to apply ACTION_PRIOR_SHOT_SCALE ({updates.get('ACTION_PRIOR_SHOT_SCALE')}); {type(e).__name__}: {e}",
-                RuntimeWarning,
-            )
-
-
 def _resolve_era_path(era_name: str) -> Optional[str]:
     """Resolve an era name into an on-disk JSON file path, if it exists."""
     if not isinstance(era_name, str) or not era_name:
@@ -471,13 +360,6 @@ def _resolve_era_path(era_name: str) -> Optional[str]:
         if p.exists():
             return str(p)
     return None
-
-
-def _merge_dict(dst: Dict[str, Any], src2: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(dst)
-    for k, v in (src2 or {}).items():
-        out[k] = v
-    return out
 
 
 def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
@@ -559,4 +441,3 @@ def validate_and_fill_era_dict(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Lis
             warnings.append(f"knobs.{kk}: expected number, got {type(vv).__name__}")
 
     return cfg, warnings, errors
-

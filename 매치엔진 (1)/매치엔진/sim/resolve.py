@@ -24,10 +24,6 @@ from .participants import (
     choose_drb_rebounder as _choose_drb_rebounder,
 )
 from .prob import (
-    PASS_BASE_SUCCESS_MULT,
-    SHOT_BASE_3,
-    SHOT_BASE_MID,
-    SHOT_BASE_RIM,
     _shot_kind_from_outcome,
     _team_variance_mult,
     prob_from_scores,
@@ -45,9 +41,12 @@ def _pick_default_actor(offense: TeamState) -> Player:
 from . import quality
 from .def_role_players import get_or_build_def_role_players, engine_get_stat
 
-ORB_BASE = 1.0
-TO_BASE = 1.0
-FOUL_BASE = 1.0
+def _knob_mult(game_cfg: "GameConfig", key: str, default: float = 1.0) -> float:
+    knobs = game_cfg.knobs if isinstance(game_cfg.knobs, Mapping) else {}
+    try:
+        return float(knobs.get(key, default))
+    except Exception:
+        return float(default)
 
 # ------------------------------------------------------------
 # Fouled-shot contact penalty (reduces and-ones, increases 2FT trips)
@@ -121,7 +120,7 @@ def rebound_orb_probability(
     off_orb *= orb_mult
     def_drb *= drb_mult
     pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
-    base = float(pm.get("orb_base", 0.26)) * float(ORB_BASE)
+    base = float(pm.get("orb_base", 0.26)) * _knob_mult(game_cfg, "orb_base_mult", 1.0)
     return prob_from_scores(
         None,
         base,
@@ -376,11 +375,11 @@ def resolve_outcome(
         base_p = shot_base.get(outcome, 0.45)
         kind = _shot_kind_from_outcome(outcome)
         if kind == "shot_rim":
-            base_p *= float(SHOT_BASE_RIM)
+            base_p *= _knob_mult(game_cfg, "shot_base_rim_mult", 1.0)
         elif kind == "shot_mid":
-            base_p *= float(SHOT_BASE_MID)
+            base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
         else:
-            base_p *= float(SHOT_BASE_3)
+            base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
         p_make = prob_from_scores(
             rng,
             base_p,
@@ -491,7 +490,7 @@ def resolve_outcome(
 
     if is_pass(outcome):
         pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
-        base_s = pass_base.get(outcome, 0.90) * float(PASS_BASE_SUCCESS_MULT)
+        base_s = pass_base.get(outcome, 0.90) * _knob_mult(game_cfg, "pass_base_success_mult", 1.0)
 
         # PASS completion (offense vs defense) - this preserves passer skill influence.
         p_ok = prob_from_scores(
@@ -756,11 +755,11 @@ def resolve_outcome(
             base_p = shot_base.get(shot_key, 0.45)
             kind = _shot_kind_from_outcome(shot_key)
             if kind == "shot_rim":
-                base_p *= float(SHOT_BASE_RIM)
+                base_p *= _knob_mult(game_cfg, "shot_base_rim_mult", 1.0)
             elif kind == "shot_mid":
-                base_p *= float(SHOT_BASE_MID)
+                base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
             else:
-                base_p *= float(SHOT_BASE_3)
+                base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
 
             p_make = prob_from_scores(
                 rng,
