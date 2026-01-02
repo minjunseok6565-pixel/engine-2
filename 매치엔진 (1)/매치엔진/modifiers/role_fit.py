@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 # This file keeps runtime-safe fallbacks so it won't crash if imported standalone.
 if TYPE_CHECKING:
     from typing import Protocol
+    from config.game_config import GameConfig
 
     class Player(Protocol):
         def get(self, key: str) -> Any: ...
@@ -58,11 +59,6 @@ def normalize_weights(w: Dict[str, float]) -> Dict[str, float]:
         except Exception:
             out[k] = 0.0
     return out
-
-
-# Optional external config hook (kept compatible with your earlier code)
-ERA_ROLE_FIT: Optional[Dict[str, Any]] = None
-
 
 
 # -----------------------------
@@ -139,14 +135,14 @@ def role_fit_grade(role: str, fit: float) -> str:
     return "D"
 
 
-def _get_role_fit_strength(offense: TeamState) -> float:
+def _get_role_fit_strength(offense: TeamState, role_fit_cfg: Optional[Dict[str, Any]] = None) -> float:
     try:
         v = (offense.tactics.context or {}).get("ROLE_FIT_STRENGTH", None)
     except Exception:
         v = None
     if v is None:
         try:
-            v = float((ERA_ROLE_FIT or {}).get("default_strength", 0.65))
+            v = float((role_fit_cfg or {}).get("default_strength", 0.65))
         except Exception:
             v = 0.65
     try:
@@ -309,8 +305,10 @@ def apply_role_fit_to_priors_and_tags(
     action_family: str,
     offense: TeamState,
     tags: Dict[str, Any],
+    game_cfg: Optional["GameConfig"] = None,
 ) -> Dict[str, float]:
-    strength = _get_role_fit_strength(offense)
+    role_fit_cfg = game_cfg.role_fit if game_cfg is not None else None
+    strength = _get_role_fit_strength(offense, role_fit_cfg=role_fit_cfg)
     participants = _collect_roles_for_action_family(action_family, offense)
     applied = bool(participants)
 

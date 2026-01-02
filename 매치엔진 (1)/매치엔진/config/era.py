@@ -657,13 +657,4 @@ def apply_era_config(era_cfg: Dict[str, Any]) -> None:
     _ACTIVE_ERA_NAME = str(era_cfg.get("name") or "unknown")
     _ACTIVE_ERA_VERSION = str(era_cfg.get("version") or "1.0")
 
-    # ---- validation.py의 allowed sets는 캐시라서 반드시 갱신 ----
-    try:
-        from .validation import refresh_allowed_sets
-        refresh_allowed_sets()
-    except Exception as e:
-        # Do not fail era application, but also do not silently ignore errors.
-        warnings.warn(
-            f"apply_era_config: refresh_allowed_sets() failed; {type(e).__name__}: {e}",
-            RuntimeWarning,
-        )
+    # NOTE: validation no longer depends on global allowed-set caches.

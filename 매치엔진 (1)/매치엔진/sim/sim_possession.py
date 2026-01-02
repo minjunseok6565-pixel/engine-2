@@ -7,7 +7,7 @@ NOTE: Split from sim.py on 2025-12-27.
 
 import random
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .builders import (
     build_defense_action_probs,
@@ -34,6 +34,9 @@ from .sim_clock import (
     simulate_inbound,
     commit_shot_clock_turnover,
 )
+
+if TYPE_CHECKING:
+    from config.game_config import GameConfig
 
 def apply_quality_to_turnover_priors(
     pri: Dict[str, float],
@@ -138,7 +141,11 @@ def _renorm(d: Dict[str, float]) -> Dict[str, float]:
         return d
     return {k: float(v) / s for k, v in d.items()}
 
-def apply_team_style_to_action_probs(probs: Dict[str, float], style: Dict[str, float]) -> Dict[str, float]:
+def apply_team_style_to_action_probs(
+    probs: Dict[str, float],
+    style: Dict[str, float],
+    game_cfg: "GameConfig",
+) -> Dict[str, float]:
     if not probs or not style:
         return probs
     out = dict(probs)
@@ -147,7 +154,7 @@ def apply_team_style_to_action_probs(probs: Dict[str, float], style: Dict[str, f
     tempo_mult = float(style.get("tempo_mult", 1.0))
 
     for k, v in list(out.items()):
-        base = get_action_base(k)
+        base = get_action_base(k, game_cfg)
         mult = 1.0
         if base == "TransitionEarly":
             mult *= tempo_mult ** 0.85
@@ -196,6 +203,7 @@ def simulate_possession(
     game_state: GameState,
     rules: Dict[str, Any],
     ctx: Dict[str, Any],
+    game_cfg: Optional["GameConfig"] = None,
     max_steps: int = 7,
 ) -> Dict[str, Any]:
     """Simulate a single possession.
@@ -207,6 +215,8 @@ def simulate_possession(
 
     if ctx is None:
         ctx = {}
+    if game_cfg is None:
+        raise ValueError("simulate_possession requires game_cfg")
 
     tempo_mult = float(ctx.get("tempo_mult", 1.0))
     time_costs = rules.get("time_costs", {})
@@ -266,7 +276,7 @@ def simulate_possession(
         out = dict(probs)
         changed = False
         for k, v in list(out.items()):
-            if get_action_base(k) == "TransitionEarly":
+            if get_action_base(k, game_cfg) == "TransitionEarly":
                 out[k] = float(v) * mult
                 changed = True
         if not changed:
@@ -278,10 +288,10 @@ def simulate_possession(
             out[k] /= s
         return out
 
-    off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx)
+    off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
     off_probs = _apply_contextual_action_weights(off_probs)
-    off_probs = apply_team_style_to_action_probs(off_probs, team_style)
-    def_probs = build_defense_action_probs(defense.tactics)
+    off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
+    def_probs = build_defense_action_probs(defense.tactics, game_cfg=game_cfg)
 
     action = weighted_choice(rng, off_probs)
     offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
@@ -290,7 +300,7 @@ def simulate_possession(
     defense.def_action_counts[def_action] = defense.def_action_counts.get(def_action, 0) + 1
 
     tags = {
-        "in_transition": (get_action_base(action) == "TransitionEarly"),
+        "in_transition": (get_action_base(action, game_cfg) == "TransitionEarly"),
         "is_side_pnr": (action == "SideAnglePnR"),
         "avg_fatigue_off": ctx.get("avg_fatigue_off"),
         "fatigue_bad_mult_max": ctx.get("fatigue_bad_mult_max"),
@@ -301,7 +311,7 @@ def simulate_possession(
 
     # --- ADD: action-dependent tags refresh helper ---
     def _refresh_action_tags(_action: str, _tags: dict) -> None:
-        _tags["in_transition"] = (get_action_base(_action) == "TransitionEarly")
+        _tags["in_transition"] = (get_action_base(_action, game_cfg) == "TransitionEarly")
         _tags["is_side_pnr"] = (_action == "SideAnglePnR")
 
     # ensure initial consistency (safe even if already set above)
@@ -337,7 +347,7 @@ def simulate_possession(
             tags["forced_max_steps"] = True
             _refresh_action_tags(action, tags)
 
-        action_cost = float(time_costs.get(get_action_base(action), 0.0))
+        action_cost = float(time_costs.get(get_action_base(action, game_cfg), 0.0))
         if action_cost > 0:
             apply_time_cost(game_state, action_cost, tempo_mult)
             if game_state.shot_clock_sec <= 0:
@@ -387,13 +397,25 @@ def simulate_possession(
                 }
 
         # shot_diet: pass ctx so outcome multipliers can apply
-        pri = build_outcome_priors(action, offense.tactics, defense.tactics, tags, ctx=ctx)
+        pri = build_outcome_priors(action, offense.tactics, defense.tactics, tags, ctx=ctx, game_cfg=game_cfg)
         pri = apply_team_style_to_outcome_priors(pri, team_style)
-        pri = apply_role_fit_to_priors_and_tags(pri, get_action_base(action), offense, tags)
-        pri = apply_quality_to_turnover_priors(pri, get_action_base(action), offense, defense, tags, ctx)
+        pri = apply_role_fit_to_priors_and_tags(pri, get_action_base(action, game_cfg), offense, tags, game_cfg=game_cfg)
+        pri = apply_quality_to_turnover_priors(pri, get_action_base(action, game_cfg), offense, defense, tags, ctx)
         outcome = weighted_choice(rng, pri)
 
-        term, payload = resolve_outcome(rng, outcome, action, offense, defense, tags, pass_chain, def_action=def_action, ctx=ctx, game_state=game_state)
+        term, payload = resolve_outcome(
+            rng,
+            outcome,
+            action,
+            offense,
+            defense,
+            tags,
+            pass_chain,
+            def_action=def_action,
+            ctx=ctx,
+            game_state=game_state,
+            game_cfg=game_cfg,
+        )
 
         if term == "SCORE":
             return {
@@ -451,9 +473,9 @@ def simulate_possession(
             ctx = dict(ctx)
             ctx["pos_start"] = "after_foul"
             ctx["dead_ball_inbound"] = True
-            off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx)
+            off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
             off_probs = _apply_contextual_action_weights(off_probs)
-            off_probs = apply_team_style_to_action_probs(off_probs, team_style)
+            off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
             action = weighted_choice(rng, off_probs)
             offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
             _refresh_action_tags(action, tags)
@@ -478,7 +500,7 @@ def simulate_possession(
             # last FT missed -> live rebound
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0)) * float(rules.get("ft_orb_mult", 0.75))
             drb_mult = float(defense.tactics.context.get("DRB_MULT", 1.0))
-            p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult)
+            p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
             if rng.random() < p_orb:
                 offense.orb += 1
                 rbd = choose_orb_rebounder(rng, offense)
@@ -514,7 +536,7 @@ def simulate_possession(
         if term == "MISS":
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0))
             drb_mult = float(defense.tactics.context.get("DRB_MULT", 1.0))
-            p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult)
+            p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
             if rng.random() < p_orb:
                 offense.orb += 1
                 rbd = choose_orb_rebounder(rng, offense)
@@ -569,9 +591,9 @@ def simulate_possession(
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
-            off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx)
+            off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
             off_probs = _apply_contextual_action_weights(off_probs)
-            off_probs = apply_team_style_to_action_probs(off_probs, team_style)
+            off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
             action = weighted_choice(rng, off_probs)
             offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
             _refresh_action_tags(action, tags)
