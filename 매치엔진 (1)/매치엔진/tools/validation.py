@@ -4,6 +4,7 @@ from .profiles import OUTCOME_PROFILES
 
 import math
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .core import clamp
@@ -117,30 +118,30 @@ def build_allowed_sets(game_cfg: "GameConfig") -> AllowedSets:
     defense_schemes = set(game_cfg.def_scheme_action_weights.keys())
 
     for scheme in game_cfg.off_scheme_action_weights.values():
-        if isinstance(scheme, dict):
+        if isinstance(scheme, Mapping):
             offense_actions.update(scheme.keys())
     for scheme in game_cfg.def_scheme_action_weights.values():
-        if isinstance(scheme, dict):
+        if isinstance(scheme, Mapping):
             defense_actions.update(scheme.keys())
 
     action_aliases = game_cfg.action_aliases
-    if isinstance(action_aliases, dict):
+    if isinstance(action_aliases, Mapping):
         offense_actions.update(action_aliases.keys())
         offense_actions.update(action_aliases.values())
 
     action_outcome_priors = game_cfg.action_outcome_priors
-    if isinstance(action_outcome_priors, dict):
+    if isinstance(action_outcome_priors, Mapping):
         offense_actions.update(action_outcome_priors.keys())
         for pri in action_outcome_priors.values():
-            if isinstance(pri, dict):
+            if isinstance(pri, Mapping):
                 outcomes.update(pri.keys())
 
     outcomes.update(OUTCOME_PROFILES.keys())
     shot_base = game_cfg.shot_base
     pass_base_success = game_cfg.pass_base_success
-    if isinstance(shot_base, dict):
+    if isinstance(shot_base, Mapping):
         outcomes.update(shot_base.keys())
-    if isinstance(pass_base_success, dict):
+    if isinstance(pass_base_success, Mapping):
         outcomes.update(pass_base_success.keys())
 
     return AllowedSets(
@@ -210,7 +211,7 @@ def _sanitize_nested_outcome_by_action(
         if act not in allowed_actions:
             report.warn(f"{path}: unknown action '{act}' ignored")
             continue
-        if not isinstance(sub, dict):
+        if not isinstance(sub, Mapping):
             msg = f"{path}.{act}: expected dict, got {type(sub).__name__}"
             if cfg.strict:
                 report.error(msg)

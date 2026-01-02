@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from . import shot_diet
 
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .core import apply_min_floor, apply_multipliers, apply_temperature, clamp, normalize_weights
@@ -16,17 +17,17 @@ if TYPE_CHECKING:
 # Builders
 # -------------------------
 
-def _fallback_scheme(weights: Dict[str, Any], fallback: str) -> Dict[str, float]:
-    if fallback in weights and isinstance(weights.get(fallback), dict):
+def _fallback_scheme(weights: Mapping[str, Any], fallback: str) -> Dict[str, float]:
+    if fallback in weights and isinstance(weights.get(fallback), Mapping):
         return dict(weights[fallback])
     for val in weights.values():
-        if isinstance(val, dict):
+        if isinstance(val, Mapping):
             return dict(val)
     return {}
 
 
 def get_action_base(action: str, game_cfg: "GameConfig") -> str:
-    aliases = game_cfg.action_aliases if isinstance(game_cfg.action_aliases, dict) else {}
+    aliases = game_cfg.action_aliases if isinstance(game_cfg.action_aliases, Mapping) else {}
     return aliases.get(action, action)
 
 def build_offense_action_probs(
@@ -41,7 +42,7 @@ def build_offense_action_probs(
     """
     if game_cfg is None:
         raise ValueError("build_offense_action_probs requires game_cfg")
-    scheme_weights = game_cfg.off_scheme_action_weights if isinstance(game_cfg.off_scheme_action_weights, dict) else {}
+    scheme_weights = game_cfg.off_scheme_action_weights if isinstance(game_cfg.off_scheme_action_weights, Mapping) else {}
     base = dict(
         scheme_weights.get(
             off_tac.offense_scheme,
@@ -138,7 +139,7 @@ def build_defense_action_probs(tac: TacticsConfig, game_cfg: Optional["GameConfi
     """
     if game_cfg is None:
         raise ValueError("build_defense_action_probs requires game_cfg")
-    scheme_weights = game_cfg.def_scheme_action_weights if isinstance(game_cfg.def_scheme_action_weights, dict) else {}
+    scheme_weights = game_cfg.def_scheme_action_weights if isinstance(game_cfg.def_scheme_action_weights, Mapping) else {}
     base = dict(
         scheme_weights.get(
             tac.defense_scheme,
@@ -166,7 +167,7 @@ def build_outcome_priors(
     if game_cfg is None:
         raise ValueError("build_outcome_priors requires game_cfg")
     base_action = get_action_base(action, game_cfg)
-    priors = game_cfg.action_outcome_priors if isinstance(game_cfg.action_outcome_priors, dict) else {}
+    priors = game_cfg.action_outcome_priors if isinstance(game_cfg.action_outcome_priors, Mapping) else {}
     default_priors = priors.get("SpotUp") if "SpotUp" in priors else _fallback_scheme(priors, "")
     pri = dict(priors.get(base_action, default_priors))
 
@@ -178,7 +179,7 @@ def build_outcome_priors(
     pri = apply_multipliers_typesafe(pri, off_tac.outcome_by_action_mult.get(base_action, {}))
 
     # offense scheme
-    off_mult = game_cfg.offense_scheme_mult if isinstance(game_cfg.offense_scheme_mult, dict) else {}
+    off_mult = game_cfg.offense_scheme_mult if isinstance(game_cfg.offense_scheme_mult, Mapping) else {}
     sm = off_mult.get(off_tac.offense_scheme, {}).get(action) or off_mult.get(off_tac.offense_scheme, {}).get(base_action) or {}
     for o, m in sm.items():
         if o in pri:
@@ -190,7 +191,7 @@ def build_outcome_priors(
     pri = apply_multipliers_typesafe(pri, def_tac.opp_outcome_by_action_mult.get(base_action, {}))
 
     # defense scheme
-    def_mult = game_cfg.defense_scheme_mult if isinstance(game_cfg.defense_scheme_mult, dict) else {}
+    def_mult = game_cfg.defense_scheme_mult if isinstance(game_cfg.defense_scheme_mult, Mapping) else {}
     dm = def_mult.get(def_tac.defense_scheme, {}).get(action) or def_mult.get(def_tac.defense_scheme, {}).get(base_action) or {}
     for o, m in dm.items():
         if o in pri:
@@ -267,8 +268,8 @@ def build_outcome_priors(
 
     # shot_diet wiring
     context = ctx if ctx is not None else tags
-    style = context.get("shot_diet_style") if isinstance(context, dict) else None
-    tactic_name = context.get("tactic_name") if isinstance(context, dict) else None
+    style = context.get("shot_diet_style") if isinstance(context, Mapping) else None
+    tactic_name = context.get("tactic_name") if isinstance(context, Mapping) else None
     if style is not None and tactic_name is not None:
         out_mult = shot_diet.get_outcome_multipliers(style, tactic_name, base_action)
         for outcome in list(pri.keys()):

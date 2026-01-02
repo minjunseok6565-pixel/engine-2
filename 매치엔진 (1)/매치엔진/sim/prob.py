@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Mapping
 from typing import Dict, Optional, TYPE_CHECKING
 
 from .core import clamp, sigmoid
@@ -46,12 +47,12 @@ def prob_from_scores(
     """
     if game_cfg is None:
         raise ValueError("prob_from_scores requires game_cfg")
-    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, dict) else DEFAULT_PROB_MODEL
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
     base_p = clamp(float(base_p), float(pm.get("base_p_min", 0.02)), float(pm.get("base_p_max", 0.98)))
     base_logit = math.log(base_p / (1.0 - base_p))
 
     # ---- sensitivity (2-1, 2-2) ----
-    lp = game_cfg.logistic_params if isinstance(game_cfg.logistic_params, dict) else DEFAULT_LOGISTIC_PARAMS
+    lp = game_cfg.logistic_params if isinstance(game_cfg.logistic_params, Mapping) else DEFAULT_LOGISTIC_PARAMS
     spec = lp.get(kind) or lp.get("default") or {}
     sens = spec.get("sensitivity")
     scale = spec.get("scale")
@@ -74,9 +75,9 @@ def prob_from_scores(
     # ---- variance knob (2-3) ----
     noise = 0.0
     if rng is not None:
-        vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, dict) else DEFAULT_VARIANCE_PARAMS
+        vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, Mapping) else DEFAULT_VARIANCE_PARAMS
         std = float(vp.get("logit_noise_std", 0.0))
-        kind_mult = float((vp.get("kind_mult") or {}).get(kind, 1.0)) if isinstance(vp.get("kind_mult"), dict) else 1.0
+        kind_mult = float((vp.get("kind_mult") or {}).get(kind, 1.0)) if isinstance(vp.get("kind_mult"), Mapping) else 1.0
         # team volatility multiplier (clamped)
         tlo, thi = 0.70, 1.40
         if isinstance(vp.get("team_mult_lo"), (int, float)):
@@ -103,7 +104,7 @@ def _shot_kind_from_outcome(outcome: str) -> str:
     return "shot_rim"
 
 def _team_variance_mult(team: "TeamState", game_cfg: "GameConfig") -> float:
-    vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, dict) else DEFAULT_VARIANCE_PARAMS
+    vp = game_cfg.variance_params if isinstance(game_cfg.variance_params, Mapping) else DEFAULT_VARIANCE_PARAMS
     try:
         vm = float((team.tactics.context or {}).get("VARIANCE_MULT", 1.0))
     except Exception:
@@ -111,4 +112,3 @@ def _team_variance_mult(team: "TeamState", game_cfg: "GameConfig") -> float:
     lo = float(vp.get("team_mult_lo", 0.70))
     hi = float(vp.get("team_mult_hi", 1.40))
     return clamp(vm, lo, hi)
-

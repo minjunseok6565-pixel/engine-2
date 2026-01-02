@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import math
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .builders import get_action_base
@@ -82,7 +83,7 @@ def resolve_free_throws(
     team: TeamState,
     game_cfg: "GameConfig",
 ) -> Dict[str, Any]:
-    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, dict) else DEFAULT_PROB_MODEL
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
     ft = shooter.get("SHOT_FT")
     p = clamp(
         float(pm.get("ft_base", 0.45)) + (ft / 100.0) * float(pm.get("ft_range", 0.47)),
@@ -119,7 +120,7 @@ def rebound_orb_probability(
     def_drb = sum(p.get("REB_DR") for p in def_players) / max(len(def_players), 1)
     off_orb *= orb_mult
     def_drb *= drb_mult
-    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, dict) else DEFAULT_PROB_MODEL
+    pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
     base = float(pm.get("orb_base", 0.26)) * float(ORB_BASE)
     return prob_from_scores(
         None,
@@ -269,8 +270,8 @@ def resolve_outcome(
 
     # Prob model / tuning knobs (ctx can override per-run)
     pm = ctx.get("prob_model")
-    if not isinstance(pm, dict):
-        pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, dict) else DEFAULT_PROB_MODEL
+    if not isinstance(pm, Mapping):
+        pm = game_cfg.prob_model if isinstance(game_cfg.prob_model, Mapping) else DEFAULT_PROB_MODEL
 
     # shot_diet participant bias (optional)
     style = ctx.get("shot_diet_style")
@@ -371,7 +372,7 @@ def resolve_outcome(
         shot_dbg = {}
         if debug_q:
             shot_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
-        shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, dict) else {}
+        shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, Mapping) else {}
         base_p = shot_base.get(outcome, 0.45)
         kind = _shot_kind_from_outcome(outcome)
         if kind == "shot_rim":
@@ -489,7 +490,7 @@ def resolve_outcome(
             })
 
     if is_pass(outcome):
-        pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, dict) else {}
+        pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
         base_s = pass_base.get(outcome, 0.90) * float(PASS_BASE_SUCCESS_MULT)
 
         # PASS completion (offense vs defense) - this preserves passer skill influence.
@@ -751,7 +752,7 @@ def resolve_outcome(
             if debug_q:
                 foul_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
 
-            shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, dict) else {}
+            shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, Mapping) else {}
             base_p = shot_base.get(shot_key, 0.45)
             kind = _shot_kind_from_outcome(shot_key)
             if kind == "shot_rim":
@@ -865,9 +866,9 @@ def resolve_outcome(
             "and_one": and_one,
             "nfts": int(nfts),
         }
-        if isinstance(ft_res, dict):
+        if isinstance(ft_res, Mapping):
             payload.update(ft_res)
-        if isinstance(foul_dbg, dict) and foul_dbg:
+        if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
         return "FOUL_FT", _with_team(payload, include_fouler=True)
 
