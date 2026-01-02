@@ -382,11 +382,6 @@ DEFAULT_ERA: Dict[str, Any] = {
     "defense_scheme_mult": copy.deepcopy(DEFENSE_SCHEME_MULT),
 }
 
-_ERA_CACHE: Dict[str, Dict[str, Any]] = {}
-_ACTIVE_ERA_NAME: str = "builtin_default"
-_ACTIVE_ERA_VERSION: str = "1.0"
-
-
 def get_mvp_rules() -> Dict[str, Any]:
     return copy.deepcopy(MVP_RULES)
 
@@ -495,15 +490,11 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
         era_name = str(raw.get("name") or "custom")
     else:
         era_name = str(era or "default")
-        if era_name in _ERA_CACHE:
-            return _ERA_CACHE[era_name], [], []
-
         path = _resolve_era_path("default" if era_name == "default" else era_name)
         if path is None:
             warnings.append(f"era file not found for '{era_name}', using built-in defaults")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
         try:
@@ -513,14 +504,12 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
             errors.append(f"failed to read era json ({path}): {e}")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
         if not isinstance(raw, dict):
             errors.append(f"era json root must be an object/dict (got {type(raw).__name__})")
             cfg = copy.deepcopy(DEFAULT_ERA)
             cfg["name"] = era_name
-            _ERA_CACHE[era_name] = cfg
             return cfg, warnings, errors
 
     cfg, w2, e2 = validate_and_fill_era_dict(raw)
@@ -530,7 +519,6 @@ def load_era_config(era: Any) -> Tuple[Dict[str, Any], List[str], List[str]]:
     cfg["name"] = str(raw.get("name") or era_name)
     cfg["version"] = str(raw.get("version") or cfg.get("version") or "1.0")
 
-    _ERA_CACHE[cfg["name"]] = cfg
     return cfg, warnings, errors
 
 
@@ -572,89 +560,3 @@ def validate_and_fill_era_dict(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Lis
 
     return cfg, warnings, errors
 
-
-def apply_era_config(era_cfg: Dict[str, Any]) -> None:
-    """Apply an era config to global tuning parameters.
-
-    IMPORTANT:
-    - Do NOT rebind dict globals (e.g., SHOT_BASE = {...}) because other modules may already
-      hold references imported from profiles/era.
-    - Always mutate dicts in-place via clear()/update().
-    """
-    global _ACTIVE_ERA_NAME, _ACTIVE_ERA_VERSION
-
-    if not isinstance(era_cfg, dict):
-        return
-
-    # ---- profiles.py에서 import된 dict들 (반드시 in-place로 갱신) ----
-    sb = era_cfg.get("shot_base")
-    if isinstance(sb, dict):
-        SHOT_BASE.clear()
-        SHOT_BASE.update(dict(sb))
-
-    pb = era_cfg.get("pass_base_success")
-    if isinstance(pb, dict):
-        PASS_BASE_SUCCESS.clear()
-        PASS_BASE_SUCCESS.update(dict(pb))
-
-    aop = era_cfg.get("action_outcome_priors")
-    if isinstance(aop, dict):
-        ACTION_OUTCOME_PRIORS.clear()
-        ACTION_OUTCOME_PRIORS.update(copy.deepcopy(aop))
-        _refresh_base_action_outcome_priors_snapshot()
-        if _SHOT_PRIOR_SCALE != 1.0:
-            _restore_action_outcome_priors_to_base()
-            _apply_shot_prior_scale(_SHOT_PRIOR_SCALE)
-
-    aa = era_cfg.get("action_aliases")
-    if isinstance(aa, dict):
-        ACTION_ALIASES.clear()
-        ACTION_ALIASES.update(dict(aa))
-
-    offw = era_cfg.get("off_scheme_action_weights")
-    if isinstance(offw, dict):
-        OFF_SCHEME_ACTION_WEIGHTS.clear()
-        OFF_SCHEME_ACTION_WEIGHTS.update(copy.deepcopy(offw))
-
-    defw = era_cfg.get("def_scheme_action_weights")
-    if isinstance(defw, dict):
-        DEF_SCHEME_ACTION_WEIGHTS.clear()
-        DEF_SCHEME_ACTION_WEIGHTS.update(copy.deepcopy(defw))
-
-    osm = era_cfg.get("offense_scheme_mult")
-    if isinstance(osm, dict):
-        OFFENSE_SCHEME_MULT.clear()
-        OFFENSE_SCHEME_MULT.update(copy.deepcopy(osm))
-
-    dsm = era_cfg.get("defense_scheme_mult")
-    if isinstance(dsm, dict):
-        DEFENSE_SCHEME_MULT.clear()
-        DEFENSE_SCHEME_MULT.update(copy.deepcopy(dsm))
-
-    # ---- era.py 내부 dict들 (다른 모듈이 from .era import ... 로 잡고 있을 수 있으니 in-place) ----
-    pm = era_cfg.get("prob_model")
-    if isinstance(pm, dict):
-        merged = _merge_dict(DEFAULT_PROB_MODEL, pm)
-        ERA_PROB_MODEL.clear()
-        ERA_PROB_MODEL.update(merged)
-
-    lp = era_cfg.get("logistic_params")
-    if isinstance(lp, dict):
-        ERA_LOGISTIC_PARAMS.clear()
-        ERA_LOGISTIC_PARAMS.update(copy.deepcopy(lp))
-
-    vp = era_cfg.get("variance_params")
-    if isinstance(vp, dict):
-        ERA_VARIANCE_PARAMS.clear()
-        ERA_VARIANCE_PARAMS.update(copy.deepcopy(vp))
-
-    rf = era_cfg.get("role_fit")
-    if isinstance(rf, dict):
-        merged = _merge_dict(DEFAULT_ROLE_FIT, rf)
-        ERA_ROLE_FIT.clear()
-        ERA_ROLE_FIT.update(merged)
-
-    _ACTIVE_ERA_NAME = str(era_cfg.get("name") or "unknown")
-    _ACTIVE_ERA_VERSION = str(era_cfg.get("version") or "1.0")
-
-    # NOTE: validation no longer depends on global allowed-set caches.

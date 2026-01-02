@@ -3,11 +3,12 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 
 def _freeze_mapping(value: Any) -> Any:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return MappingProxyType({k: _freeze_mapping(v) for k, v in value.items()})
     if isinstance(value, list):
         return tuple(_freeze_mapping(v) for v in value)
@@ -38,8 +39,10 @@ class GameConfig:
     defense_scheme_mult: Mapping[str, Any]
 
 
-def build_game_config(era_cfg: dict) -> GameConfig:
-    cfg_copy = copy.deepcopy(era_cfg) if isinstance(era_cfg, dict) else {}
+def build_game_config(era_cfg: Mapping[str, Any]) -> GameConfig:
+    if not isinstance(era_cfg, Mapping):
+        raise TypeError(f"build_game_config expected Mapping, got {type(era_cfg).__name__}")
+    cfg_copy = copy.deepcopy(era_cfg)
     frozen = _freeze_mapping(cfg_copy)
     return GameConfig(
         era=frozen,
