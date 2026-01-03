@@ -7,6 +7,7 @@ NOTE: Split from sim.py on 2025-12-27.
 
 import random
 import math
+import warnings
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .builders import (
@@ -113,7 +114,11 @@ def ensure_team_style(rng: random.Random, team: TeamState, rules: Dict[str, Any]
     """
     try:
         ctx = team.tactics.context
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"ensure_team_style: failed to access tactics.context for team '{getattr(team, 'name', 'unknown')}' "
+            f"({type(exc).__name__}: {exc})"
+        )
         ctx = None
     if not isinstance(ctx, dict):
         return {}
@@ -218,6 +223,18 @@ def simulate_possession(
     if game_cfg is None:
         raise ValueError("simulate_possession requires game_cfg")
 
+    def _record_ctx_error(where: str, exc: BaseException) -> None:
+        try:
+            errs = ctx.setdefault("errors", [])
+            errs.append(
+                {
+                    "where": where,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        except Exception:
+            return
+
     tempo_mult = float(ctx.get("tempo_mult", 1.0))
     time_costs = rules.get("time_costs", {})
     had_orb = False
@@ -251,7 +268,8 @@ def simulate_possession(
     tactic_name = None
     try:
         tactic_name = offense.tactics.offense_scheme
-    except Exception:
+    except Exception as exc:
+        _record_ctx_error("tactic_name_access", exc)
         tactic_name = None
     ctx["shot_diet_style"] = style
     ctx["tactic_name"] = tactic_name
