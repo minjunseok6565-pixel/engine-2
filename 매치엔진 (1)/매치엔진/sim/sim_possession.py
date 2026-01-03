@@ -24,6 +24,7 @@ from .models import GameState, TeamState
 from .resolve import (
     choose_drb_rebounder,
     choose_orb_rebounder,
+    post_possession_cleanup,
     rebound_orb_probability,
     resolve_outcome,
 )
@@ -248,20 +249,25 @@ def simulate_possession(
         ctx["tempo_mult"] = tempo_mult
         ctx["team_style"] = team_style
 
+    def _end_possession(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Finalize possession state (score/turnover/DRB) and decay pass/usage context."""
+        post_possession_cleanup(ctx)
+        return payload
+
     # Dead-ball start can trigger inbound (score, quarter start, dead-ball TO, etc.)
     pos_start = str(ctx.get("pos_start", ""))
     dead_ball_starts = {"start_q", "after_score", "after_tov_dead"}
     if pos_start in dead_ball_starts:
         # dead-ball inbound attempt
         if simulate_inbound(rng, offense, defense, rules):
-            return {
+            return _end_possession({
                 "end_reason": "TURNOVER",
                 "pos_start_next": "after_tov",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_start,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-            }
+            })
 
     # shot_diet wiring
     style = shot_diet.compute_shot_diet_style(offense, defense, game_state=game_state, ctx=ctx)
@@ -370,24 +376,24 @@ def simulate_possession(
             apply_time_cost(game_state, action_cost, tempo_mult)
             if game_state.shot_clock_sec <= 0:
                 commit_shot_clock_turnover(offense)
-                return {
+                return _end_possession({
                     "end_reason": "SHOTCLOCK",
                     "pos_start_next": "after_tov_dead",
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+                })
             if game_state.clock_sec <= 0:
                 game_state.clock_sec = 0
-                return {
+                return _end_possession({
                     "end_reason": "PERIOD_END",
                     "pos_start_next": pos_start,
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+                })
         elif forced_due_to_stall:
             # If the rules table provides 0-cost actions, the clocks may not move.
             # When we are forcing a bailout action due to stalling, make sure time advances.
@@ -395,24 +401,24 @@ def simulate_possession(
             apply_time_cost(game_state, forced_cost, tempo_mult)
             if game_state.shot_clock_sec <= 0:
                 commit_shot_clock_turnover(offense)
-                return {
+                return _end_possession({
                     "end_reason": "SHOTCLOCK",
                     "pos_start_next": "after_tov_dead",
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+                })
             if game_state.clock_sec <= 0:
                 game_state.clock_sec = 0
-                return {
+                return _end_possession({
                     "end_reason": "PERIOD_END",
                     "pos_start_next": pos_start,
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+                })
 
         # shot_diet: pass ctx so outcome multipliers can apply
         pri = build_outcome_priors(action, offense.tactics, defense.tactics, tags, ctx=ctx, game_cfg=game_cfg)
@@ -436,24 +442,24 @@ def simulate_possession(
         )
 
         if term == "SCORE":
-            return {
+            return _end_possession({
                 "end_reason": "SCORE",
                 "pos_start_next": "after_score",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_start,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-            }
+            })
 
         if term == "TURNOVER":
-            return {
+            return _end_possession({
                 "end_reason": "TURNOVER",
                 "pos_start_next": "after_tov",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_start,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-            }
+            })
 
         if term == "FOUL_NO_SHOTS":
             # dead-ball stop, offense retains ball
@@ -462,14 +468,14 @@ def simulate_possession(
                 apply_dead_ball_cost(game_state, stop_cost, tempo_mult)
                 if game_state.clock_sec <= 0:
                     game_state.clock_sec = 0
-                    return {
+                    return _end_possession({
                         "end_reason": "PERIOD_END",
                         "pos_start_next": "after_foul",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
+                    })
 
             # 14s reset rule (if < 14 then reset up)
             foul_reset = float(rules.get("foul_reset", 14))
@@ -478,14 +484,14 @@ def simulate_possession(
 
             # inbound restart (can turnover)
             if simulate_inbound(rng, offense, defense, rules):
-                return {
+                return _end_possession({
                     "end_reason": "TURNOVER",
                     "pos_start_next": "after_tov",
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+                })
 
             # restart with set-play bias
             ctx = dict(ctx)
@@ -505,7 +511,7 @@ def simulate_possession(
         if term == "FOUL_FT":
             # If last FT made -> dead-ball score, possession ends.
             if bool(payload.get("last_made", False)):
-                return {
+                return _end_possession({
                     "end_reason": "SCORE",
                     "pos_start_next": "after_score",
                     "points_scored": int(offense.pts) - before_pts,
@@ -513,7 +519,7 @@ def simulate_possession(
                     "pos_start": pos_start,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     "ended_with_ft_trip": True,
-                }
+                })
 
             # last FT missed -> live rebound
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0)) * float(rules.get("ft_orb_mult", 0.75))
@@ -521,7 +527,7 @@ def simulate_possession(
             p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
             if rng.random() < p_orb:
                 offense.orb += 1
-                rbd = choose_orb_rebounder(rng, offense)
+                rbd = choose_orb_rebounder(rng, offense, payload.get("shot_zone_detail"))
                 offense.add_player_stat(rbd.pid, "ORB", 1)
                 game_state.shot_clock_sec = float(rules.get("foul_reset", rules.get("orb_reset", game_state.shot_clock_sec)))
                 r2 = rng.random()
@@ -539,9 +545,9 @@ def simulate_possession(
 
 
             defense.drb += 1
-            rbd = choose_drb_rebounder(rng, defense)
+            rbd = choose_drb_rebounder(rng, defense, payload.get("shot_zone_detail"))
             defense.add_player_stat(rbd.pid, "DRB", 1)
-            return {
+            return _end_possession({
                 "end_reason": "DRB",
                 "pos_start_next": "after_drb",
                 "points_scored": int(offense.pts) - before_pts,
@@ -549,7 +555,7 @@ def simulate_possession(
                 "pos_start": pos_start,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                 "ended_with_ft_trip": True,
-            }
+            })
 
         if term == "MISS":
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0))
@@ -557,7 +563,7 @@ def simulate_possession(
             p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
             if rng.random() < p_orb:
                 offense.orb += 1
-                rbd = choose_orb_rebounder(rng, offense)
+                rbd = choose_orb_rebounder(rng, offense, payload.get("shot_zone_detail"))
                 offense.add_player_stat(rbd.pid, "ORB", 1)
                 game_state.shot_clock_sec = float(rules.get("orb_reset", game_state.shot_clock_sec))
                 r2 = rng.random()
@@ -574,16 +580,16 @@ def simulate_possession(
                 continue
 
             defense.drb += 1
-            rbd = choose_drb_rebounder(rng, defense)
+            rbd = choose_drb_rebounder(rng, defense, payload.get("shot_zone_detail"))
             defense.add_player_stat(rbd.pid, "DRB", 1)
-            return {
+            return _end_possession({
                 "end_reason": "DRB",
                 "pos_start_next": "after_drb",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_start,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-            }
+            })
 
         if term == "RESET":
             reset_cost = float(time_costs.get("Reset", 0.0))
@@ -591,24 +597,24 @@ def simulate_possession(
                 apply_time_cost(game_state, reset_cost, tempo_mult)
                 if game_state.shot_clock_sec <= 0:
                     commit_shot_clock_turnover(offense)
-                    return {
+                    return _end_possession({
                         "end_reason": "SHOTCLOCK",
                         "pos_start_next": "after_tov_dead",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
+                    })
                 if game_state.clock_sec <= 0:
                     game_state.clock_sec = 0
-                    return {
+                    return _end_possession({
                         "end_reason": "PERIOD_END",
                         "pos_start_next": pos_start,
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
+                    })
             off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
             off_probs = _apply_contextual_action_weights(off_probs)
             off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
@@ -631,24 +637,24 @@ def simulate_possession(
                 apply_time_cost(game_state, pass_cost, tempo_mult)
                 if game_state.shot_clock_sec <= 0:
                     commit_shot_clock_turnover(offense)
-                    return {
+                    return _end_possession({
                         "end_reason": "SHOTCLOCK",
                         "pos_start_next": "after_tov_dead",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
+                    })
                 if game_state.clock_sec <= 0:
                     game_state.clock_sec = 0
-                    return {
+                    return _end_possession({
                         "end_reason": "PERIOD_END",
                         "pos_start_next": pos_start,
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
                         "pos_start": pos_start,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
+                    })
 
             if outcome in ("PASS_KICKOUT", "PASS_SKIP", "PASS_EXTRA"):
                 action = "SpotUp" if rng.random() < 0.72 else "ExtraPass"
@@ -669,24 +675,24 @@ def simulate_possession(
     # (SHOTCLOCK is handled immediately when time costs are applied.)
     if game_state.shot_clock_sec <= 0:
         commit_shot_clock_turnover(offense)
-        return {
+        return _end_possession({
             "end_reason": "SHOTCLOCK",
             "pos_start_next": "after_tov_dead",
             "points_scored": int(offense.pts) - before_pts,
             "had_orb": had_orb,
             "pos_start": pos_start,
             "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-        }
+        })
 
     game_state.clock_sec = 0
-    return {
+    return _end_possession({
         "end_reason": "PERIOD_END",
         "pos_start_next": pos_start,
         "points_scored": int(offense.pts) - before_pts,
         "had_orb": had_orb,
         "pos_start": pos_start,
         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-    }
+    })
 
 
 

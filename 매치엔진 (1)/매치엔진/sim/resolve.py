@@ -3,14 +3,13 @@ from __future__ import annotations
 import random
 import math
 from collections.abc import Mapping
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .builders import get_action_base
 from .core import clamp, dot_profile, sigmoid
 from .defense import team_def_snapshot
 from .era import DEFAULT_PROB_MODEL
 from .participants import (
-    choose_assister_deterministic,
     choose_creator_for_pulloff,
     choose_finisher_rim,
     choose_post_target,
@@ -20,6 +19,7 @@ from .participants import (
     choose_weighted_player,
     choose_default_actor,
     choose_fouler_pid,
+    choose_turnover_actor,
     choose_orb_rebounder as _choose_orb_rebounder,
     choose_drb_rebounder as _choose_drb_rebounder,
 )
@@ -131,14 +131,73 @@ def rebound_orb_probability(
         game_cfg=game_cfg,
     )
 
-def choose_orb_rebounder(rng: random.Random, offense: TeamState) -> Player:
+def choose_orb_rebounder(
+    rng: random.Random,
+    offense: TeamState,
+    shot_zone_detail: Optional[str] = None,
+) -> Player:
     """Compatibility wrapper: rebounder selection lives in participants."""
-    return _choose_orb_rebounder(rng, offense)
+    return _choose_orb_rebounder(rng, offense, shot_zone_detail)
 
 
-def choose_drb_rebounder(rng: random.Random, defense: TeamState) -> Player:
+def choose_drb_rebounder(
+    rng: random.Random,
+    defense: TeamState,
+    shot_zone_detail: Optional[str] = None,
+) -> Player:
     """Compatibility wrapper: rebounder selection lives in participants."""
-    return _choose_drb_rebounder(rng, defense)
+    return _choose_drb_rebounder(rng, defense, shot_zone_detail)
+
+
+def _choose_assister_from_pass_history(
+    rng: random.Random,
+    offense: TeamState,
+    shooter_pid: str,
+    pass_history: Optional[List[str]],
+    pass_chain: int,
+) -> Optional[str]:
+    history = list(pass_history or [])
+    history = [pid for pid in history if isinstance(pid, str) and pid and pid != shooter_pid]
+    last_pid = history[-1] if history else None
+    prev_pid = history[-2] if len(history) >= 2 else None
+
+    if pass_chain >= 2 and len(history) >= 2:
+        if rng.random() < 0.80:
+            return last_pid
+        return prev_pid
+
+    if last_pid and rng.random() < 0.92:
+        return last_pid
+
+    cand = [p for p in offense.on_court_players() if p.pid != shooter_pid]
+    if not cand:
+        return None
+    weights = {p.pid: max(p.get("PASS_CREATE"), 1.0) ** 1.06 for p in cand}
+    return weighted_choice(rng, weights)
+
+
+def post_possession_cleanup(ctx: Dict[str, Any]) -> None:
+    """Reset pass context and decay usage tracking after a possession ends."""
+    if not isinstance(ctx, dict):
+        return
+    ctx["pass_chain"] = 0
+    ctx["pass_history"] = []
+    ctx["last_passer_pid"] = None
+    fga_by_pid = ctx.get("fga_by_pid")
+    if not isinstance(fga_by_pid, dict):
+        return
+    to_del = []
+    for pid, count in fga_by_pid.items():
+        try:
+            decayed = int(int(count) * 0.88)
+        except Exception:
+            continue
+        if decayed <= 0:
+            to_del.append(pid)
+        else:
+            fga_by_pid[pid] = decayed
+    for pid in to_del:
+        fga_by_pid.pop(pid, None)
 
 
 
@@ -230,7 +289,12 @@ def resolve_outcome(
         return payload
 
     if outcome == "TO_SHOT_CLOCK":
-        actor = _pick_default_actor(offense)
+        actor = choose_turnover_actor(rng, offense, outcome, base_action="", ctx=ctx)
+        ctx.setdefault("fga_by_pid", {})
+        ctx.setdefault("pass_history", [])
+        ctx.setdefault("last_passer_pid", None)
+        ctx.setdefault("pass_chain", pass_chain)
+        ctx["last_actor_pid"] = actor.pid
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
         return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
@@ -284,11 +348,11 @@ def resolve_outcome(
     # choose participants
     if is_shot(outcome):
         if outcome in ("SHOT_3_CS",):
-            actor = choose_shooter_for_three(rng, offense, style=style)
+            actor = choose_shooter_for_three(rng, offense, style=style, ctx=ctx)
         elif outcome in ("SHOT_MID_CS",):
-            actor = choose_shooter_for_mid(rng, offense, style=style)
+            actor = choose_shooter_for_mid(rng, offense, style=style, ctx=ctx)
         elif outcome in ("SHOT_3_OD","SHOT_MID_PU"):
-            actor = choose_creator_for_pulloff(rng, offense, outcome, style=style)
+            actor = choose_creator_for_pulloff(rng, offense, outcome, style=style, ctx=ctx)
         elif outcome == "SHOT_POST":
             actor = choose_post_target(offense)
         elif outcome in ("SHOT_RIM_DUNK",):
@@ -302,11 +366,19 @@ def resolve_outcome(
         if outcome == "FOUL_DRAW_POST":
             actor = choose_post_target(offense)
         elif outcome == "FOUL_DRAW_JUMPER":
-            actor = choose_creator_for_pulloff(rng, offense, "SHOT_3_OD", style=style)
+            actor = choose_creator_for_pulloff(rng, offense, "SHOT_3_OD", style=style, ctx=ctx)
         else:
             actor = choose_finisher_rim(rng, offense, dunk_bias=False, style=style, base_action=base_action)
+    elif is_to(outcome):
+        actor = choose_turnover_actor(rng, offense, outcome, base_action, ctx=ctx)
     else:
         actor = _pick_default_actor(offense)
+
+    ctx.setdefault("fga_by_pid", {})
+    ctx.setdefault("pass_history", [])
+    ctx.setdefault("last_passer_pid", None)
+    ctx.setdefault("pass_chain", pass_chain)
+    ctx["last_actor_pid"] = actor.pid
 
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
@@ -395,6 +467,12 @@ def resolve_outcome(
         pts = outcome_points(outcome)
 
         offense.fga += 1
+        try:
+            fga_by_pid = ctx.get("fga_by_pid", {})
+            if isinstance(fga_by_pid, dict):
+                fga_by_pid[actor.pid] = int(fga_by_pid.get(actor.pid, 0)) + 1
+        except Exception as e:
+            _record_exception("fga_by_pid_update", e)
         zone = shot_zone_from_outcome(outcome)
         if zone:
             offense.shot_zones[zone] = offense.shot_zones.get(zone, 0) + 1
@@ -457,11 +535,16 @@ def resolve_outcome(
             # "_PU" 계열은 기본적으로 unassisted로 둔다
 
             if assisted:
-                assister = choose_assister_deterministic(offense, actor.pid)
-                if assister:
-                    assister_pid = assister.pid
+                assister_pid = _choose_assister_from_pass_history(
+                    rng,
+                    offense,
+                    actor.pid,
+                    pass_history=ctx.get("pass_history"),
+                    pass_chain=pass_chain_val,
+                )
+                if assister_pid:
                     offense.ast += 1
-                    offense.add_player_stat(assister.pid, "AST", 1)
+                    offense.add_player_stat(assister_pid, "AST", 1)
                     if zone_detail:
                         offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
 
@@ -627,7 +710,25 @@ def resolve_outcome(
                     prev = 0.0
                 ctx["carry_logit_delta"] = float(quality.apply_pass_carry(prev + carry_out, next_outcome="*"))
 
-            payload = {"outcome": outcome, "pass_chain": pass_chain + 1}
+            try:
+                current_chain = int(ctx.get("pass_chain", pass_chain))
+            except Exception as e:
+                _record_exception("pass_chain_parse", e)
+                current_chain = int(pass_chain)
+            ctx["pass_chain"] = current_chain + 1
+            ctx["last_passer_pid"] = actor.pid
+            try:
+                history = ctx.get("pass_history")
+                if not isinstance(history, list):
+                    history = []
+                history.append(actor.pid)
+                if len(history) > 3:
+                    history.pop(0)
+                ctx["pass_history"] = history
+            except Exception as e:
+                _record_exception("pass_history_update", e)
+
+            payload = {"outcome": outcome, "pass_chain": ctx["pass_chain"]}
             if debug_q:
                 payload.update(
                     {
@@ -669,9 +770,24 @@ def resolve_outcome(
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
         def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
 
-        # assign a random fouler from on-court defenders (MVP)
+        # assign a fouler from on-court defenders (scheme-role buckets + meta buckets)
         if def_on_court:
-            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit)
+            scheme = getattr(defense.tactics, "defense_scheme", "")
+            role_players = get_or_build_def_role_players(ctx, defense, scheme=scheme)
+            zone_detail = shot_zone_detail_from_outcome(outcome, action, game_cfg, rng)
+            fouler_pid = choose_fouler_pid(
+                rng,
+                defense,
+                list(def_on_court),
+                pf,
+                foul_out_limit,
+                outcome=outcome,
+                base_action=base_action,
+                attacker_pid=actor.pid,
+                shot_zone_detail=zone_detail,
+                role_players=role_players,
+                scheme=str(scheme),
+            )
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
                 if game_state is not None:
@@ -833,11 +949,16 @@ def resolve_outcome(
                         _record_exception("assist_flag_parse", e)
                         assisted = False
                 if assisted:
-                    assister = choose_assister_deterministic(offense, actor.pid)
-                    if assister:
-                        assister_pid = assister.pid
+                    assister_pid = _choose_assister_from_pass_history(
+                        rng,
+                        offense,
+                        actor.pid,
+                        pass_history=ctx.get("pass_history"),
+                        pass_chain=int(ctx.get("pass_chain", pass_chain)),
+                    )
+                    if assister_pid:
                         offense.ast += 1
-                        offense.add_player_stat(assister.pid, "AST", 1)
+                        offense.add_player_stat(assister_pid, "AST", 1)
                         if zone_detail:
                             offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
 
