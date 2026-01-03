@@ -112,18 +112,17 @@ def _choose_ot_start_offense(
     rng: random.Random,
     rules: Dict[str, Any],
     game_state: GameState,
-    teamA: TeamState,
-    teamB: TeamState,
     home: TeamState,
+    away: TeamState,
 ) -> TeamState:
     mode = str(rules.get("ot_start_possession_mode", "jumpball")).lower().strip()
 
     if mode == "random":
-        return teamA if rng.random() < 0.5 else teamB
+        return home if rng.random() < 0.5 else away
 
     # default: jumpball
-    a_on = _get_on_court(game_state, teamA, home)
-    b_on = _get_on_court(game_state, teamB, home)
+    a_on = _get_on_court(game_state, home, home)
+    b_on = _get_on_court(game_state, away, home)
 
     def strength(team: TeamState, pids: List[str]) -> float:
         vals: List[float] = []
@@ -136,8 +135,8 @@ def _choose_ot_start_offense(
                 vals.append(r + 0.6 * ph)
         return max(vals) if vals else 50.0
 
-    sA = strength(teamA, a_on)
-    sB = strength(teamB, b_on)
+    sA = strength(home, a_on)
+    sB = strength(away, b_on)
 
     jb = rules.get("ot_jumpball", {}) or {}
     scale = float(jb.get("scale", 12.0))
@@ -145,7 +144,7 @@ def _choose_ot_start_offense(
 
     # sigmoid on strength gap
     pA = 1.0 / (1.0 + math.exp(-(sA - sB) / scale))
-    return teamA if rng.random() < pA else teamB
+    return home if rng.random() < pA else away
 
 def init_player_boxes(team: TeamState) -> None:
     for p in team.lineup:
@@ -223,8 +222,8 @@ def summarize_team(
 
 def simulate_game(
     rng: random.Random,
-    teamA: TeamState,
-    teamB: TeamState,
+    home: TeamState,
+    away: TeamState,
     era: str = "default",
     strict_validation: bool = True,
     validation: Optional[ValidationConfig] = None,
@@ -256,8 +255,8 @@ def simulate_game(
         if isinstance(k.get("mult_hi"), (int, float)):
             cfg.mult_hi = float(k["mult_hi"])
 
-    validate_and_sanitize_team(teamA, cfg, report, label=f"team[{teamA.name}]", game_cfg=game_cfg)
-    validate_and_sanitize_team(teamB, cfg, report, label=f"team[{teamB.name}]", game_cfg=game_cfg)
+    validate_and_sanitize_team(home, cfg, report, label=f"team[{home.name}]", game_cfg=game_cfg)
+    validate_and_sanitize_team(away, cfg, report, label=f"team[{away.name}]", game_cfg=game_cfg)
 
     if cfg.strict and report.errors:
         # Raise with a compact, actionable message (full list is also in report)
@@ -265,50 +264,50 @@ def simulate_game(
         more = f"\n... (+{len(report.errors)-6} more)" if len(report.errors) > 6 else ""
         raise ValueError(f"MatchEngine input validation failed:\n{head}{more}")
 
-    init_player_boxes(teamA)
-    init_player_boxes(teamB)
+    init_player_boxes(home)
+    init_player_boxes(away)
 
     rules = get_mvp_rules()
-    home = teamA
-    targets_home = _init_targets(teamA, rules)
-    targets_away = _init_targets(teamB, rules)
+    targets_home = _init_targets(home, rules)
+    targets_away = _init_targets(away, rules)
 
     # Starting 5 defaults to lineup order, but if Initiator_Primary is configured we enforce:
     # - exactly 1 Initiator_Primary on-court at tip-off (best-effort)
-    start_home = [p.pid for p in teamA.lineup[:5]]
-    start_away = [p.pid for p in teamB.lineup[:5]]
-    start_home = _enforce_initiator_primary_start(teamA, start_home, targets_home, rules)
-    start_away = _enforce_initiator_primary_start(teamB, start_away, targets_away, rules)
+    start_home = [p.pid for p in home.lineup[:5]]
+    start_away = [p.pid for p in away.lineup[:5]]
+    start_home = _enforce_initiator_primary_start(home, start_home, targets_home, rules)
+    start_away = _enforce_initiator_primary_start(away, start_away, targets_away, rules)
     game_state = GameState(
         quarter=1,
         clock_sec=0,
         shot_clock_sec=0,
-        score_home=teamA.pts,
-        score_away=teamB.pts,
+        score_home=home.pts,
+        score_away=away.pts,
         possession=0,
         team_fouls={HOME: 0, AWAY: 0},
         player_fouls={HOME: {}, AWAY: {}},
         fatigue={
-            HOME: {p.pid: 1.0 for p in teamA.lineup},
-            AWAY: {p.pid: 1.0 for p in teamB.lineup},
+            HOME: {p.pid: 1.0 for p in home.lineup},
+            AWAY: {p.pid: 1.0 for p in away.lineup},
         },
         minutes_played_sec={
-            HOME: {p.pid: 0 for p in teamA.lineup},
-            AWAY: {p.pid: 0 for p in teamB.lineup},
+            HOME: {p.pid: 0 for p in home.lineup},
+            AWAY: {p.pid: 0 for p in away.lineup},
         },
         on_court_home=list(start_home),
         on_court_away=list(start_away),
         targets_sec_home=targets_home,
         targets_sec_away=targets_away,
     )
-    teamA.set_on_court(start_home)
-    teamB.set_on_court(start_away)
+    home.set_on_court(start_home)
+    away.set_on_court(start_away)
 
     regulation_quarters = int(rules.get("quarters", 4))
     overtime_length = float(rules.get("overtime_length", 300))
     total_possessions = 0
     overtime_periods = 0
     replay_token = ""
+    debug_errors: List[Dict[str, Any]] = []
 
     def _play_period(q: int, period_length_sec: float) -> None:
         nonlocal total_possessions, replay_token
@@ -321,11 +320,11 @@ def simulate_game(
         # - Regulation: alternate (A starts Q1/Q3, B starts Q2/Q4)
         # - OT: jumpball/random (configurable)
         if q < regulation_quarters:
-            offense = teamA if (q % 2 == 0) else teamB
+            offense = home if (q % 2 == 0) else away
         else:
-            offense = _choose_ot_start_offense(rng, rules, game_state, teamA, teamB, home=home)
+            offense = _choose_ot_start_offense(rng, rules, game_state, home, away)
 
-        defense = teamB if offense is teamA else teamA
+        defense = away if offense is home else home
         pos_start = "start_q"
 
 
@@ -335,8 +334,8 @@ def simulate_game(
 
             start_clock = game_state.clock_sec
 
-            off_on_court = _get_on_court(game_state, offense, teamA)
-            def_on_court = _get_on_court(game_state, defense, teamA)
+            off_on_court = _get_on_court(game_state, offense, home)
+            def_on_court = _get_on_court(game_state, defense, home)
 
             offense.set_on_court(off_on_court)
             defense.set_on_court(def_on_court)
@@ -359,7 +358,7 @@ def simulate_game(
             avg_def_fatigue = sum(def_fatigue_map.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
             def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
 
-            score_diff = teamA.pts - teamB.pts
+            score_diff = home.pts - away.pts
             is_clutch = game_state.quarter >= regulation_quarters and game_state.clock_sec <= 120 and abs(score_diff) <= 8
             is_garbage = game_state.quarter == regulation_quarters and game_state.clock_sec <= 360 and abs(score_diff) >= 20
             variance_mult = 0.80 if is_clutch else 1.25 if is_garbage else 1.0
@@ -420,6 +419,19 @@ def simulate_game(
             # full shot clock starts after setup
             game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
+            pos_errors = ctx.get("errors") if isinstance(ctx, dict) else None
+            if isinstance(pos_errors, list) and pos_errors:
+                for err in pos_errors:
+                    debug_errors.append(
+                        {
+                            "possession": int(game_state.possession),
+                            "quarter": int(game_state.quarter),
+                            "offense": offense.name,
+                            "defense": defense.name,
+                            "error": dict(err) if isinstance(err, dict) else {"error": str(err)},
+                        }
+                    )
+                ctx["errors"] = []
 
             elapsed = max(start_clock - game_state.clock_sec, 0.0)
             _update_minutes(game_state, off_on_court, elapsed, offense, home)
@@ -457,15 +469,18 @@ def simulate_game(
                 try:
                     if float(first_fga_sc) >= 16.0:
                         offense.fastbreak_pts += pts_scored
-                except Exception:
-                    pass
+                except Exception as exc:
+                    report.warn(
+                        f"fastbreak_pts: invalid first_fga_shotclock_sec '{first_fga_sc}' "
+                        f"({type(exc).__name__}: {exc})"
+                    )
 
             _perform_rotation(rng, offense, home, game_state, rules, is_garbage)
             _perform_rotation(rng, defense, home, game_state, rules, is_garbage)
 
             total_possessions += 1
-            game_state.score_home = teamA.pts
-            game_state.score_away = teamB.pts
+            game_state.score_home = home.pts
+            game_state.score_away = away.pts
 
             if game_state.clock_sec <= 0 or pos_res.get("end_reason") == "PERIOD_END":
                 game_state.clock_sec = 0
@@ -475,15 +490,15 @@ def simulate_game(
             offense, defense = defense, offense
             pos_start = str(pos_res.get("pos_start_next", "after_tov"))
 
-        replay_token = make_replay_token(rng, teamA, teamB, era=era)
+        replay_token = make_replay_token(rng, home, away, era=era)
 
     def _apply_period_break(break_sec: float) -> None:
         if break_sec <= 0:
             return
-        onA = _get_on_court(game_state, teamA, home)
-        onB = _get_on_court(game_state, teamB, home)
-        _apply_break_recovery(teamA, onA, game_state, rules, break_sec, home)
-        _apply_break_recovery(teamB, onB, game_state, rules, break_sec, home)
+        onA = _get_on_court(game_state, home, home)
+        onB = _get_on_court(game_state, away, home)
+        _apply_break_recovery(home, onA, game_state, rules, break_sec, home)
+        _apply_break_recovery(away, onB, game_state, rules, break_sec, home)
 
     break_between = float(rules.get("break_sec_between_periods", 0.0))
     break_before_ot = float(rules.get("break_sec_before_ot", break_between))
@@ -497,16 +512,16 @@ def simulate_game(
             _apply_period_break(break_between)
 
     # If tie after regulation, apply break before OT1
-    if teamA.pts == teamB.pts:
+    if home.pts == away.pts:
         _apply_period_break(break_before_ot)
 
     # Overtime(s)
-    while teamA.pts == teamB.pts:
+    while home.pts == away.pts:
         overtime_periods += 1
         _play_period(regulation_quarters - 1 + overtime_periods, overtime_length)
 
         # if still tied, apply break before next OT
-        if teamA.pts == teamB.pts:
+        if home.pts == away.pts:
             _apply_period_break(break_before_ot)
 
     return {
@@ -518,19 +533,20 @@ def simulate_game(
             "overtime_periods": overtime_periods,
             "validation": report.to_dict(),
             "internal_debug": {
-                "role_fit": {
-                    "role_counts": {teamA.name: teamA.role_fit_role_counts, teamB.name: teamB.role_fit_role_counts},
-                    "grade_counts": {teamA.name: teamA.role_fit_grade_counts, teamB.name: teamB.role_fit_grade_counts},
-                    "pos_log": {teamA.name: teamA.role_fit_pos_log, teamB.name: teamB.role_fit_pos_log},
-                    "bad_totals": {teamA.name: teamA.role_fit_bad_totals, teamB.name: teamB.role_fit_bad_totals},
-                    "bad_by_grade": {teamA.name: teamA.role_fit_bad_by_grade, teamB.name: teamB.role_fit_bad_by_grade},
+                "errors": list(debug_errors),
+                    "role_fit": {
+                    "role_counts": {home.name: home.role_fit_role_counts, away.name: away.role_fit_role_counts},
+                    "grade_counts": {home.name: home.role_fit_grade_counts, away.name: away.role_fit_grade_counts},
+                    "pos_log": {home.name: home.role_fit_pos_log, away.name: away.role_fit_pos_log},
+                    "bad_totals": {home.name: home.role_fit_bad_totals, away.name: away.role_fit_bad_totals},
+                    "bad_by_grade": {home.name: home.role_fit_bad_by_grade, away.name: away.role_fit_bad_by_grade},
                 }
             },
         },
-        "possessions_per_team": max(teamA.possessions, teamB.possessions),
+        "possessions_per_team": max(home.possessions, away.possessions),
         "teams": {
-            teamA.name: summarize_team(teamA, game_state, home=home),
-            teamB.name: summarize_team(teamB, game_state, home=home),
+            home.name: summarize_team(home, game_state, home=home),
+            away.name: summarize_team(away, game_state, home=home),
         },
         "game_state": {
             "team_fouls": dict(game_state.team_fouls),

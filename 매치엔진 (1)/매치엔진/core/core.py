@@ -24,12 +24,12 @@ You can integrate by:
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
-import math, random, json, hashlib, pickle, os, copy
+import math, random, json, hashlib, pickle, os, copy, warnings
 
 
 ENGINE_VERSION: str = "mvp_plus_0.2"
 
-def make_replay_token(rng: random.Random, teamA: 'TeamState', teamB: 'TeamState', era: str = "default") -> str:
+def make_replay_token(rng: random.Random, home: 'TeamState', away: 'TeamState', era: str = "default") -> str:
     """Create a short stable token to reproduce/debug a game.
 
     Token is derived from: engine version, era, RNG state hash, rosters, roles, and tactics.
@@ -37,7 +37,8 @@ def make_replay_token(rng: random.Random, teamA: 'TeamState', teamB: 'TeamState'
     try:
         state_bytes = pickle.dumps(rng.getstate())
         rng_hash = hashlib.sha256(state_bytes).hexdigest()
-    except Exception:
+    except Exception as exc:
+        warnings.warn(f"make_replay_token: failed to hash RNG state ({type(exc).__name__}: {exc})")
         rng_hash = "no_state"
 
     def _player_payload(p: 'Player') -> Dict[str, Any]:
@@ -70,17 +71,17 @@ def make_replay_token(rng: random.Random, teamA: 'TeamState', teamB: 'TeamState'
         'engine_version': ENGINE_VERSION,
         'era': era,
         'rng_state_hash': rng_hash,
-        'teamA': {
-            'name': teamA.name,
-            'roles': teamA.roles,
-            'lineup': [_player_payload(p) for p in teamA.lineup],
-            'tactics': _tactics_payload(teamA.tactics),
+        'home': {
+            'name': home.name,
+            'roles': home.roles,
+            'lineup': [_player_payload(p) for p in home.lineup],
+            'tactics': _tactics_payload(home.tactics),
         },
-        'teamB': {
-            'name': teamB.name,
-            'roles': teamB.roles,
-            'lineup': [_player_payload(p) for p in teamB.lineup],
-            'tactics': _tactics_payload(teamB.tactics),
+        'away': {
+            'name': away.name,
+            'roles': away.roles,
+            'lineup': [_player_payload(p) for p in away.lineup],
+            'tactics': _tactics_payload(away.tactics),
         },
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
@@ -148,5 +149,3 @@ def apply_multipliers(base: Dict[str, float], mults: Dict[str, float]) -> Dict[s
         if k in out:
             out[k] *= float(m)
     return out
-
-

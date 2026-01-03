@@ -207,7 +207,7 @@ def demo(seed: int = 7) -> None:
             context={"PACE_MULT":1.02}
         )
 
-        teamA = TeamState(
+        home = TeamState(
             name="A_SpreadPnR",
             lineup=[
                 make_sample_player(rng,"A1","A1_PG","PG_SHOOT"),
@@ -220,7 +220,7 @@ def demo(seed: int = 7) -> None:
             tactics=tA_tac
         )
 
-        teamB = TeamState(
+        away = TeamState(
             name="B_DriveKick",
             lineup=[
                 make_sample_player(rng,"B1","B1_PG","SLASH"),
@@ -233,28 +233,28 @@ def demo(seed: int = 7) -> None:
             tactics=tB_tac
         )
 
-        res = simulate_game(rng, teamA, teamB)
-        score_a = res["teams"][teamA.name]["PTS"]
-        score_b = res["teams"][teamB.name]["PTS"]
+        res = simulate_game(rng, home, away)
+        score_a = res["teams"][home.name]["PTS"]
+        score_b = res["teams"][away.name]["PTS"]
         fouls = res.get("game_state", {}).get("team_fouls", {})
         fatigue = res.get("game_state", {}).get("fatigue", {})
-        hist = res["teams"][teamA.name]["OffActionCounts"]
+        hist = res["teams"][home.name]["OffActionCounts"]
         total = sum(hist.values()) or 1
         freq = {k: round(v / total * 100, 2) for k, v in sorted(hist.items(), key=lambda kv: -kv[1])}
 
         print(f"\n=== Run: {label} (Defense scheme={def_scheme}) ===")
-        print(f"Final Score: {teamA.name} {score_a} - {teamB.name} {score_b}")
-        print_player_boxscore_table(teamA, res, home=teamA)
-        print_player_boxscore_table(teamB, res, home=teamA)
+        print(f"Final Score: {home.name} {score_a} - {away.name} {score_b}")
+        print_player_boxscore_table(home, res, home=home)
+        print_player_boxscore_table(away, res, home=home)
         print("Team fouls:", fouls)
-        home_key = team_key(teamA, teamA)
-        away_key = team_key(teamB, teamA)
+        home_key = team_key(home, home)
+        away_key = team_key(away, home)
         sample_fatigue = {
             home_key: {pid: round(fatigue.get(home_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(home_key, {}).keys())[:4]},
             away_key: {pid: round(fatigue.get(away_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(away_key, {}).keys())[:4]},
         }
         print("Sample fatigue:", sample_fatigue)
-        print("Action frequency (team A offense):", freq)
+        print("Action frequency (home offense):", freq)
         print("Possessions per team:", res["possessions_per_team"])
 
     print(f"Quarter length: {rules['quarter_length']}s | Shot clock: {rules['shot_clock']}s")
@@ -281,49 +281,49 @@ def run_excel_match(args) -> None:
     rng = random.Random(args.seed)
     rules = get_mvp_rules()
 
-    teamA = build_team_state_from_excel(
-        args.xlsx, args.teamA,
+    home = build_team_state_from_excel(
+        args.xlsx, args.home,
         lineup_selectors=_parse_csv_list(args.playersA),
         offense_scheme=args.offA,
         defense_scheme=args.defA,
     )
-    teamB = build_team_state_from_excel(
-        args.xlsx, args.teamB,
+    away = build_team_state_from_excel(
+        args.xlsx, args.away,
         lineup_selectors=_parse_csv_list(args.playersB),
         offense_scheme=args.offB,
         defense_scheme=args.defB,
     )
 
     print(f"Quarter length: {rules['quarter_length']}s | Shot clock: {rules['shot_clock']}s")
-    label = f"{teamA.name} vs {teamB.name} (xlsx)"
+    label = f"{home.name} vs {away.name} (xlsx)"
 
-    res = simulate_game(rng, teamA, teamB, era=args.era, strict_validation=True)
+    res = simulate_game(rng, home, away, era=args.era, strict_validation=True)
 
     # ✅ sim.py는 최상위 "score" 키를 반환하지 않음. 점수는 teams 요약의 "PTS"에 있음.
-    score_a = (res.get("teams") or {}).get(teamA.name, {}).get("PTS", 0)
-    score_b = (res.get("teams") or {}).get(teamB.name, {}).get("PTS", 0)
+    score_a = (res.get("teams") or {}).get(home.name, {}).get("PTS", 0)
+    score_b = (res.get("teams") or {}).get(away.name, {}).get("PTS", 0)
 
     fouls = (res.get("game_state") or {}).get("team_fouls", {})
 
     # ✅ fatigue_map이 아니라 fatigue
     fatigue = (res.get("game_state") or {}).get("fatigue", {})
 
-    # ✅ action_frequency는 현재 sim.py 반환값에 없음 → teams[teamA]["OffActionCounts"] 기반으로 계산
+    # ✅ action_frequency는 현재 sim.py 반환값에 없음 → teams[home]["OffActionCounts"] 기반으로 계산
     freq = {}
     try:
-        hist = (res.get("teams") or {}).get(teamA.name, {}).get("OffActionCounts", {}) or {}
+        hist = (res.get("teams") or {}).get(home.name, {}).get("OffActionCounts", {}) or {}
         total = sum(hist.values()) or 1
         freq = {k: round(v / total * 100.0, 2) for k, v in sorted(hist.items(), key=lambda kv: -kv[1])}
     except Exception:
         freq = {}
 
     print(f"\n=== Run: {label} ===")
-    print(f"Final Score: {teamA.name} {score_a} - {teamB.name} {score_b}")
-    print_player_boxscore_table(teamA, res, home=teamA)
-    print_player_boxscore_table(teamB, res, home=teamA)
+    print(f"Final Score: {home.name} {score_a} - {away.name} {score_b}")
+    print_player_boxscore_table(home, res, home=home)
+    print_player_boxscore_table(away, res, home=home)
     print("Team fouls:", fouls)
-    home_key = team_key(teamA, teamA)
-    away_key = team_key(teamB, teamA)
+    home_key = team_key(home, home)
+    away_key = team_key(away, home)
     sample_fatigue = {
         home_key: {pid: round(fatigue.get(home_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(home_key, {}).keys())[:4]},
         away_key: {pid: round(fatigue.get(away_key, {}).get(pid, 1.0), 3) for pid in list(fatigue.get(away_key, {}).keys())[:4]},
@@ -336,8 +336,8 @@ def main(argv=None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(description="match_engine demo")
     ap.add_argument("--xlsx", default=None, help="Excel roster path. If set, runs an Excel-based matchup instead of the built-in random demo.")
-    ap.add_argument("--teamA", default=None, help="Team name/code in Excel (column 'Team'). Required if --xlsx is set.")
-    ap.add_argument("--teamB", default=None, help="Team name/code in Excel (column 'Team'). Required if --xlsx is set.")
+    ap.add_argument("--home", default=None, help="Home team name/code in Excel (column 'Team'). Required if --xlsx is set.")
+    ap.add_argument("--away", default=None, help="Away team name/code in Excel (column 'Team'). Required if --xlsx is set.")
     ap.add_argument("--playersA", default="", help="Comma-separated player pids or names for Team A lineup (auto-fill to 5).")
     ap.add_argument("--playersB", default="", help="Comma-separated player pids or names for Team B lineup (auto-fill to 5).")
     ap.add_argument("--offA", default="Spread_HeavyPnR", help="Offense scheme for Team A.")
@@ -349,8 +349,8 @@ def main(argv=None) -> None:
     args = ap.parse_args(argv)
 
     if args.xlsx:
-        if not args.teamA or not args.teamB:
-            ap.error("--teamA and --teamB are required when using --xlsx")
+        if not args.home or not args.away:
+            ap.error("--home and --away are required when using --xlsx")
         run_excel_match(args)
     else:
         demo()
