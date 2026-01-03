@@ -665,7 +665,40 @@ FOUL_META_BUCKETS = (
 )
 
 # Optional scheme-specific role-key -> bucket mapping overrides.
-DEF_FOUL_META_BUCKET_MAP_BY_SCHEME: Dict[str, Dict[str, Sequence[str]]] = {}
+DEF_FOUL_META_BUCKET_MAP_BY_SCHEME = {
+  "drop": {
+    "RIM_PROTECT": ["PnR_Cover_Big_Drop", "Lowman_Helper"],
+    "POA": ["PnR_POA_Defender"],
+    "HELP_CLOSEOUT": ["Nail_Helper", "Weakside_Rotator"],
+  },
+  "블리츠-트랩": {
+    "STEAL_PRESS": ["PnR_POA_Blitz", "PnR_Cover_Big_Blitz", "Nail_Helper"],
+    "HELP_CLOSEOUT": ["Weakside_Rotator"],
+    "RIM_PROTECT": ["Lowman_Helper"],
+  },
+  "아이스 픽앤롤": {
+    "POA": ["PnR_POA_Ice"],
+    "RIM_PROTECT": ["PnR_Cover_Big_Ice", "Lowman_Helper"],
+    "HELP_CLOSEOUT": ["Nail_Helper", "Strongside_Corner_Defender"],
+  },
+  "올-스위치": {
+    "RIM_PROTECT": ["Backline_Anchor"],
+    "POST": ["PnR_POA_Switch"],
+    "POA": ["PnR_Cover_Big_Switch", "Switch_Wing_Strong"],
+    "HELP_CLOSEOUT": ["Switch_Wing_Weak"],
+  },
+  "헷지-쇼앤리커버": {
+    "POA": ["PnR_POA_Defender", "PnR_Cover_Big_HedgeRecover"],
+    "HELP_CLOSEOUT": ["Nail_Helper", "Weakside_Rotator"],
+    "RIM_PROTECT": ["Lowman_Helper"],
+  },
+  "2-3 존디펜스": {
+    "RIM_PROTECT": ["Zone_Bottom_Left", "Zone_Bottom_Right"],
+    "POST": ["Zone_Bottom_Center"],
+    "HELP_CLOSEOUT": ["Zone_Top_Left", "Zone_Top_Right"],
+  },
+}
+
 
 _FOUL_BUCKET_MIX = {
     "FOUL_DRAW_POST": {
