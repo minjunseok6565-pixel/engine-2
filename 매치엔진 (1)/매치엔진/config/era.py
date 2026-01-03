@@ -248,7 +248,6 @@ DEFENSE_META_PARAMS = {
         ],
         "Blitz_TrapPnR": [
             {"key": "PASS_SHORTROLL", "min": 0.10, "require_base_action": "PnR"},
-            {"key": "FOUL_REACH_TRAP", "add": 0.02},
         ],
         "Zone": [
             {"key": "SHOT_3_CS", "mult": 1.06},
