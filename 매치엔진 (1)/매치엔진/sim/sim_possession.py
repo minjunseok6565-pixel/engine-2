@@ -495,64 +495,72 @@ def simulate_possession(
         if stall_steps >= max_steps:
             forced_due_to_stall = True
             stall_steps = 0
-            action = "SpotUp"
+            action = "QuickShot"
             tags["forced_max_steps"] = True
             _refresh_action_tags(action, tags)
 
-        action_cost = float(time_costs.get(get_action_base(action, game_cfg), 0.0))
+        action_cost = float(_estimate_action_cost_sec(action))
+        # Clamp cost so we never consume more time than remains.
+        tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
+        max_base_cost = max(0.0, min(float(sc0), float(gc0)) / tm)
+        if action_cost > max_base_cost:
+            action_cost = max_base_cost
+
+        clock_expired = False
+        shotclock_expired = False
+
         if action_cost > 0:
             apply_time_cost(game_state, action_cost, tempo_mult)
-            if game_state.shot_clock_sec <= 0:
-                commit_shot_clock_turnover(offense)
-                return {
-                    "end_reason": "SHOTCLOCK",
-                    "pos_start_next": "after_tov_dead",
-                    "points_scored": int(offense.pts) - before_pts,
-                    "had_orb": had_orb,
-                    "pos_start": pos_start,
-                    "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
-            if game_state.clock_sec <= 0:
-                game_state.clock_sec = 0
-                return {
-                    "end_reason": "PERIOD_END",
-                    "pos_start_next": pos_start,
-                    "points_scored": int(offense.pts) - before_pts,
-                    "had_orb": had_orb,
-                    "pos_start": pos_start,
-                    "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
         elif forced_due_to_stall:
-            # If the rules table provides 0-cost actions, the clocks may not move.
-            # When we are forcing a bailout action due to stalling, make sure time advances.
-            forced_cost = 0.75
-            apply_time_cost(game_state, forced_cost, tempo_mult)
-            if game_state.shot_clock_sec <= 0:
-                commit_shot_clock_turnover(offense)
-                return {
-                    "end_reason": "SHOTCLOCK",
-                    "pos_start_next": "after_tov_dead",
-                    "points_scored": int(offense.pts) - before_pts,
-                    "had_orb": had_orb,
-                    "pos_start": pos_start,
-                    "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
-            if game_state.clock_sec <= 0:
-                game_state.clock_sec = 0
-                return {
-                    "end_reason": "PERIOD_END",
-                    "pos_start_next": pos_start,
-                    "points_scored": int(offense.pts) - before_pts,
-                    "had_orb": had_orb,
-                    "pos_start": pos_start,
-                    "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+            # When forcing a bailout due to stalling, ensure clocks advance a bit.
+            forced_cost = min(0.75, max_base_cost)
+            if forced_cost > 0:
+                apply_time_cost(game_state, forced_cost, tempo_mult)
+
+        # Normalize negative clocks to 0 for stability.
+        if game_state.clock_sec < 0:
+            game_state.clock_sec = 0
+        if game_state.shot_clock_sec < 0:
+            game_state.shot_clock_sec = 0
+
+        clock_expired = (game_state.clock_sec <= 0)
+        shotclock_expired = (game_state.shot_clock_sec <= 0)
+
+        base_action_now = get_action_base(action, game_cfg)
+
+        # If time expires during a non-terminal action (pass/reset), end immediately.
+        if shotclock_expired and _is_nonterminal_base(base_action_now):
+            commit_shot_clock_turnover(offense)
+            return {
+                "end_reason": "SHOTCLOCK",
+                "pos_start_next": "after_tov_dead",
+                "points_scored": int(offense.pts) - before_pts,
+                "had_orb": had_orb,
+                "pos_start": pos_start,
+                "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+            }
+        if clock_expired and _is_nonterminal_base(base_action_now):
+            game_state.clock_sec = 0
+            return {
+                "end_reason": "PERIOD_END",
+                "pos_start_next": pos_start,
+                "points_scored": int(offense.pts) - before_pts,
+                "had_orb": had_orb,
+                "pos_start": pos_start,
+                "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+            }
+
 
         # shot_diet: pass ctx so outcome multipliers can apply
         pri = build_outcome_priors(action, offense.tactics, defense.tactics, tags, ctx=ctx, game_cfg=game_cfg)
         pri = apply_team_style_to_outcome_priors(pri, team_style)
         pri = apply_role_fit_to_priors_and_tags(pri, get_action_base(action, game_cfg), offense, tags, game_cfg=game_cfg)
         pri = apply_quality_to_turnover_priors(pri, get_action_base(action, game_cfg), offense, defense, tags, ctx)
+        pri = _apply_urgent_outcome_constraints(pri)
+        if clock_expired or shotclock_expired:
+            pri_term = {k: v for k, v in pri.items() if (not k.startswith("PASS_") and not k.startswith("RESET_"))}
+            if pri_term:
+                pri = _normalize_prob_map(pri_term)
         outcome = weighted_choice(rng, pri)
 
         term, payload = resolve_outcome(
@@ -628,7 +636,7 @@ def simulate_possession(
             off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
             off_probs = _apply_contextual_action_weights(off_probs)
             off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
-            action = weighted_choice(rng, off_probs)
+            action = choose_action_with_budget(rng, off_probs)
             offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
             _refresh_action_tags(action, tags)
             pass_chain = 0
@@ -721,8 +729,24 @@ def simulate_possession(
 
         if term == "RESET":
             reset_cost = float(time_costs.get("Reset", 0.0))
+            tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
+            budget_now = _budget_sec()
+
+            # If time is tight, skip the reset and force a quick attempt.
+            if budget_now <= (min_release_window + 0.05) or (reset_cost * tm) >= max(0.0, budget_now - min_release_window):
+                action = "QuickShot"
+                _refresh_action_tags(action, tags)
+                pass_chain = 0
+                stall_steps = _bump_stall(stall_steps, sc0, gc0)
+                continue
+                
             if reset_cost > 0:
                 apply_time_cost(game_state, reset_cost, tempo_mult)
+                if game_state.clock_sec < 0:
+                    game_state.clock_sec = 0
+                if game_state.shot_clock_sec < 0:
+                    game_state.shot_clock_sec = 0
+                    
                 if game_state.shot_clock_sec <= 0:
                     commit_shot_clock_turnover(offense)
                     return {
@@ -746,7 +770,7 @@ def simulate_possession(
             off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
             off_probs = _apply_contextual_action_weights(off_probs)
             off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
-            action = weighted_choice(rng, off_probs)
+            action = choose_action_with_budget(rng, off_probs)
             offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
             _refresh_action_tags(action, tags)
             pass_chain = 0
@@ -761,8 +785,24 @@ def simulate_possession(
                 pass_cost = float(time_costs.get("Kickout", 0.0))
             elif outcome == "PASS_EXTRA":
                 pass_cost = float(time_costs.get("ExtraPass", 0.0))
+
+            tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
+            budget_now = _budget_sec()
+
+            # If too little time remains to safely complete a pass, force a quick attempt instead.
+            if pass_cost > 0 and (pass_cost * tm) >= max(0.0, budget_now - min_release_window):
+                action = "QuickShot"
+                _refresh_action_tags(action, tags)
+                stall_steps = _bump_stall(stall_steps, sc0, gc0)
+                continue
+
             if pass_cost > 0:
                 apply_time_cost(game_state, pass_cost, tempo_mult)
+                if game_state.clock_sec < 0:
+                    game_state.clock_sec = 0
+                if game_state.shot_clock_sec < 0:
+                    game_state.shot_clock_sec = 0
+                    
                 if game_state.shot_clock_sec <= 0:
                     commit_shot_clock_turnover(offense)
                     return {
@@ -785,14 +825,16 @@ def simulate_possession(
                     }
 
             if outcome in ("PASS_KICKOUT", "PASS_SKIP", "PASS_EXTRA"):
-                action = "SpotUp" if rng.random() < 0.72 else "ExtraPass"
+                # Avoid chaining extra passes late: choose a budget-feasible catch-and-shoot.
+                action = choose_action_with_budget(rng, {"SpotUp": 0.72, "ExtraPass": 0.28})
             elif outcome == "PASS_SHORTROLL":
-                action = "Drive" if rng.random() < 0.40 else "Kickout"
+                action = choose_action_with_budget(rng, {"Drive": 0.40, "Kickout": 0.60})
             else:
-                action = weighted_choice(rng, off_probs)
+                action = choose_action_with_budget(rng, off_probs)
 
             if pass_chain >= 3:
-                action = "SpotUp"
+                # After a long pass chain, bias toward a shot attempt.
+                action = choose_action_with_budget(rng, {"SpotUp": 1.0})
 
             _refresh_action_tags(action, tags)
             stall_steps = _bump_stall(stall_steps, sc0, gc0)
@@ -800,18 +842,6 @@ def simulate_possession(
 
 
     # If we exit the loop here, the only expected reason is the period/game clock reaching 0.
-    # (SHOTCLOCK is handled immediately when time costs are applied.)
-    if game_state.shot_clock_sec <= 0:
-        commit_shot_clock_turnover(offense)
-        return {
-            "end_reason": "SHOTCLOCK",
-            "pos_start_next": "after_tov_dead",
-            "points_scored": int(offense.pts) - before_pts,
-            "had_orb": had_orb,
-            "pos_start": pos_start,
-            "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-        }
-
     game_state.clock_sec = 0
     return {
         "end_reason": "PERIOD_END",
