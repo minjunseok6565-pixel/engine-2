@@ -397,7 +397,7 @@ def simulate_game(
                  away_fmap = game_state.fatigue.get(AWAY, {}) if isinstance(game_state.fatigue, dict) else {}
                  avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
                  avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
-                 maybe_timeout_deadball(
+                 timeout_evt = maybe_timeout_deadball(
                      rng,
                      game_state,
                      rules,
@@ -409,6 +409,12 @@ def simulate_game(
                      home_team_id=home_team_id,
                      away_team_id=away_team_id,
                  )
+                 rec = rules.get("timeout_recovery", {})
+                 if timeout_evt and isinstance(rec, dict) and bool(rec.get("enabled", False)):
+                     break_sec = float(rec.get("equiv_break_sec", 12.0))
+                     if break_sec > 0:
+                         _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
+                         _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
              except Exception:
                  # Timeout logic must never break simulation.
                  pass
