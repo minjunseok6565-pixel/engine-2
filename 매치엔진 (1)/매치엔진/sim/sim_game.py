@@ -406,6 +406,18 @@ def simulate_game(
             }
             setup_key = setup_map.get(pos_start, "possession_setup")
             setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
+            # Late-clock guardrail: never allow dead-ball setup to delete the possession entirely.
+            timing = rules.get("timing", {}) or {}
+            try:
+                min_release_window = float(timing.get("min_release_window", 0.7))
+            except Exception:
+                min_release_window = 0.7
+            # apply_dead_ball_cost consumes (setup_cost * tempo_mult) seconds from the game clock.
+            # Ensure we leave at least `min_release_window` seconds for a live attempt.
+            if setup_cost > 0:
+                tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
+                max_setup = max(0.0, (float(game_state.clock_sec) - min_release_window) / tm)
+                setup_cost = min(setup_cost, max_setup)
             if setup_cost > 0:
                 apply_dead_ball_cost(game_state, setup_cost, tempo_mult)
                 if game_state.clock_sec <= 0:
