@@ -326,12 +326,32 @@ def simulate_game(
         defense = away if offense is home else home
         pos_start = "start_q"
 
+        # Possession-continuation state: some dead-ball events (e.g. no-shot foul) can stop play
+        # and restart with the same offense. In those cases we re-enter the loop without counting
+        # a new possession, and we must preserve possession-scope aggregates.
+        pos_is_continuation = False
+        pos_before_pts = 0
+        pos_had_orb = False
+        pos_origin_start = ""
+        pos_first_fga_sc = None
+
 
         while game_state.clock_sec > 0:
             game_state.possession = total_possessions
-            game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
 
+            # For continuation segments (e.g. after a no-shot foul), preserve the current
+            # shot clock value (the foul-stop logic may have applied a 14s reset already).
+            if not (pos_is_continuation and pos_start == "after_foul"):
+                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+                
             start_clock = game_state.clock_sec
+
+            # Initialize possession-scope aggregates only once per possession.
+            if not pos_is_continuation:
+                pos_before_pts = int(offense.pts)
+                pos_had_orb = False
+                pos_origin_start = str(pos_start)
+                pos_first_fga_sc = None
 
             off_on_court = _get_on_court(game_state, offense, home)
             def_on_court = _get_on_court(game_state, defense, home)
@@ -392,19 +412,33 @@ def simulate_game(
                 "foul_out": int(rules.get("foul_out", 6)),
                 "bonus_threshold": bonus_threshold,
                 "pos_start": pos_start,
-                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead"),
+                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul"),
+
+                # Possession-continuation support (used by sim_possession).
+                "_pos_continuation": pos_is_continuation,
+                "_pos_before_pts": pos_before_pts,
+                "_pos_had_orb": pos_had_orb,
+                "_pos_origin_start": pos_origin_start,
+                "first_fga_shotclock_sec": pos_first_fga_sc,
             }
 
-            # Setup time: dead-ball only (game clock runs; shot clock should start at full)
-            setup_map = {
-                "start_q": "setup_start_q",
-                "after_score": "setup_after_score",
-                "after_drb": "setup_after_drb",
-                "after_tov": "setup_after_tov",
-                "after_tov_dead": "setup_after_tov",
-            }
-            setup_key = setup_map.get(pos_start, "possession_setup")
-            setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
+            # Setup time: dead-ball only (game clock runs; shot clock should start at full).
+            # For continuation after a no-shot foul, the foul-stop already accounted for the
+            # stoppage time, so we skip additional setup here.
+            if pos_is_continuation and pos_start == "after_foul":
+                setup_cost = 0.0
+            else:
+                setup_map = {
+                    "start_q": "setup_start_q",
+                    "after_score": "setup_after_score",
+                    "after_drb": "setup_after_drb",
+                    "after_tov": "setup_after_tov",
+                    "after_tov_dead": "setup_after_tov",
+                    "after_foul": "setup_after_foul",
+                }
+                setup_key = setup_map.get(pos_start, "possession_setup")
+                setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
+             if setup_cost > 0:
             # Late-clock guardrail: never allow dead-ball setup to delete the possession entirely.
             timing = rules.get("timing", {}) or {}
             try:
@@ -427,8 +461,10 @@ def simulate_game(
                     game_state.clock_sec = 0
                     break
 
-            # full shot clock starts after setup
-            game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+            # Full shot clock starts after setup (unless this is a continuation segment
+            # where the shot clock value must be preserved).
+            if not (pos_is_continuation and pos_start == "after_foul"):
+                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
             pos_errors = ctx.get("errors") if isinstance(ctx, dict) else None
             if isinstance(pos_errors, list) and pos_errors:
@@ -459,6 +495,24 @@ def simulate_game(
             _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed, home)
             _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed, home)
 
+            # Track possession-scope aggregates across dead-ball stop continuations.
+            if bool(pos_res.get("had_orb", False)):
+                pos_had_orb = True
+            if pos_first_fga_sc is None and pos_res.get("first_fga_shotclock_sec") is not None:
+                pos_first_fga_sc = pos_res.get("first_fga_shotclock_sec")
+
+            # Dead-ball stop (e.g. no-shot foul): same offense retains the ball.
+            # We do NOT count a new possession, and we do NOT swap offense/defense.
+            if pos_res.get("end_reason") == "DEADBALL_STOP":
+                pos_is_continuation = True
+                game_state.score_home = home.pts
+                game_state.score_away = away.pts
+                if game_state.clock_sec <= 0:
+                    game_state.clock_sec = 0
+                    break
+                pos_start = str(pos_res.get("pos_start_next", "after_foul"))
+                continue
+
             pts_scored = int(pos_res.get("points_scored", 0))
             had_orb = bool(pos_res.get("had_orb", False))
             pos_start_val = str(pos_res.get("pos_start", ""))
@@ -488,6 +542,9 @@ def simulate_game(
 
             _perform_rotation(rng, offense, home, game_state, rules, is_garbage)
             _perform_rotation(rng, defense, home, game_state, rules, is_garbage)
+
+            # Possession ended.
+            pos_is_continuation = False
 
             total_possessions += 1
             game_state.score_home = home.pts
