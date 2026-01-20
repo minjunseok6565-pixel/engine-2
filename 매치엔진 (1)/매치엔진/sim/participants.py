@@ -1,6 +1,7 @@
 # -------------------------
 from __future__ import annotations
 
+import math
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -442,24 +443,144 @@ def choose_default_actor(offense: TeamState) -> Player:
     return max(_active(offense), key=lambda p: p.get("PASS_CREATE"))
 
 
+def _softmax_pick_player(
+    rng: random.Random,
+    players: List[Player],
+    scores: List[float],
+    beta: float,
+    mix: float = 1.0,
+) -> Optional[Player]:
+    """Pick one player using softmax(exp(beta * score)).
+
+    We use a numerically stable form by subtracting the max score before exponentiation.
+    """
+    if not players:
+        return None
+    if len(players) != len(scores) or not scores:
+        return players[0]
+
+    beta = max(float(beta), 0.0)
+    mix = _clamp(float(mix), 0.0, 1.0)
+    m = max(scores)
+    base = 1.0 - mix
+    weights = {p.pid: (base + mix * math.exp(beta * (float(s) - m))) for p, s in zip(players, scores)}
+    pid = weighted_choice(rng, weights)
+    for p in players:
+        if p.pid == pid:
+            return p
+    return players[0]
+
+
+# Rebound softmax expects a stable score scale. We normalize the raw rebound score
+# (REB_OR/REB_DR + 0.20*PHYSICAL) into 0..1 before applying softmax.
+_REB_NORM_LO: float = 75.0
+_REB_NORM_HI: float = 120.0
+
+
+def _reb_norm(v: float) -> float:
+    if _REB_NORM_HI <= _REB_NORM_LO:
+        return 0.0
+    return _clamp((float(v) - _REB_NORM_LO) / (_REB_NORM_HI - _REB_NORM_LO), 0.0, 1.0)
+
+
 def choose_orb_rebounder(rng: random.Random, offense: TeamState) -> Player:
-    """Choose an offensive rebounder (keeps legacy behavior: top-3 ORB weighted)."""
-    cand = sorted(
-        _active(offense),
-        key=lambda p: p.get("REB_OR") + 0.20 * p.get("PHYSICAL"),
-        reverse=True,
-    )[:3]
-    return choose_weighted_player(rng, cand, "REB_OR", power=1.15)
+    """Choose an offensive rebounder.
+
+    Improvement 7-A: include all 5 on-court players and sample with softmax weights.
+    This keeps bigs favored but allows guards/wings to occasionally grab long rebounds.
+
+    Tuning: tactics.context['ORB_SOFTMAX_BETA'] (default 3.2)
+    """
+    cand = list(_active(offense))
+    beta = float(getattr(getattr(offense, 'tactics', None), 'context', {}).get('ORB_SOFTMAX_BETA', 3.2))
+    raw_scores = [p.get('REB_OR') + 0.20 * p.get('PHYSICAL') for p in cand]
+    scores = [_reb_norm(s) for s in raw_scores]
+    return _softmax_pick_player(rng, cand, scores, beta) or cand[0]
 
 
 def choose_drb_rebounder(rng: random.Random, defense: TeamState) -> Player:
-    """Choose a defensive rebounder (keeps legacy behavior: top-3 DRB weighted)."""
-    cand = sorted(
-        _active(defense),
-        key=lambda p: p.get("REB_DR") + 0.20 * p.get("PHYSICAL"),
-        reverse=True,
-    )[:3]
-    return choose_weighted_player(rng, cand, "REB_DR", power=1.10)
+    """Choose a defensive rebounder.
+
+    Improvement 7-A: include all 5 on-court players and sample with softmax weights.
+
+    Tuning: tactics.context['DRB_SOFTMAX_BETA'] (default 2.2), tactics.context['DRB_SOFTMAX_MIX'] (default 0.92)
+
+    DRB_SOFTMAX_MIX blends uniform weights with softmax to reduce extreme top-1 dominance.
+    mix=1.0 is pure softmax; mix=0.0 is uniform.
+    """
+    cand = list(_active(defense))
+    ctx = getattr(getattr(defense, 'tactics', None), 'context', {}) or {}
+    beta = float(ctx.get('DRB_SOFTMAX_BETA', 2.2))
+    mix = float(ctx.get('DRB_SOFTMAX_MIX', 0.92))
+    raw_scores = [p.get('REB_DR') + 0.20 * p.get('PHYSICAL') for p in cand]
+    scores = [_reb_norm(s) for s in raw_scores]
+    return _softmax_pick_player(rng, cand, scores, beta) or cand[0]
+
+
+# -------------------------
+# Foul assignment (Improvement 6-A, 6-B)
+# -------------------------
+
+_FOUL_NORM_LO = 60.0
+_FOUL_NORM_HI = 100.0
+
+
+def _norm01(v: float, lo: float = _FOUL_NORM_LO, hi: float = _FOUL_NORM_HI) -> float:
+    if hi <= lo:
+        return 0.0
+    return _clamp((float(v) - float(lo)) / (float(hi) - float(lo)), 0.0, 1.0)
+
+
+def _nstat(p: Player, key: str) -> float:
+    # Use fatigue-insensitive stats for foul tendency; fatigue is modeled separately.
+    return _norm01(p.get(key, fatigue_sensitive=False))
+
+
+def _foul_tendency_score(p: Player, outcome: Optional[str]) -> float:
+    """Return a 0..~1.45 score expressing 'how likely this defender commits this foul type'.
+
+    We model: involvement * (0.55 + 0.9 * mistake)
+      - involvement: who is usually involved for this foul type (role proxy)
+      - mistake: undisciplined / tired / late to contest -> more likely to foul
+
+    Outcome types seen in engine:
+      - FOUL_REACH_TRAP
+      - FOUL_DRAW_JUMPER
+      - FOUL_DRAW_POST
+      - FOUL_DRAW_RIM
+    """
+    phys = _nstat(p, 'PHYSICAL')
+    poa = _nstat(p, 'DEF_POA')
+    steal = _nstat(p, 'DEF_STEAL')
+    rim = _nstat(p, 'DEF_RIM')
+    post = _nstat(p, 'DEF_POST')
+    help_ = _nstat(p, 'DEF_HELP')
+
+    # DISCIPLINE isn't in the roster schema; use safety/IQ proxies.
+    disc = 0.5 * _nstat(p, 'PASS_SAFE') + 0.5 * _nstat(p, 'HANDLE_SAFE')
+    undisc = 1.0 - disc
+
+    # Fatigue increases foul likelihood (separate from fatigue-sensitive stats).
+    fat = _clamp(1.0 - float(getattr(p, 'energy', 1.0)), 0.0, 1.0)
+
+    if outcome == 'FOUL_REACH_TRAP':
+        inv = 0.55 * steal + 0.30 * poa + 0.15 * help_
+        mist = 0.45 * undisc + 0.35 * fat + 0.20 * (1.0 - poa)
+    elif outcome == 'FOUL_DRAW_JUMPER':
+        inv = 0.70 * poa + 0.30 * help_
+        mist = 0.45 * undisc + 0.35 * fat + 0.20 * (1.0 - poa)
+    elif outcome == 'FOUL_DRAW_RIM':
+        inv = 0.65 * rim + 0.20 * help_ + 0.15 * phys
+        mist = 0.40 * undisc + 0.35 * fat + 0.25 * (1.0 - rim)
+    elif outcome == 'FOUL_DRAW_POST':
+        inv = 0.60 * post + 0.25 * phys + 0.15 * help_
+        mist = 0.40 * undisc + 0.35 * fat + 0.25 * (1.0 - post)
+    else:
+        # Generic fallback: balanced involvement + standard mistake model.
+        inv = 0.35 * poa + 0.25 * help_ + 0.20 * rim + 0.20 * post
+        mist = 0.45 * undisc + 0.35 * fat + 0.20 * (1.0 - poa)
+
+    return float(inv) * (0.55 + 0.90 * float(mist))
 
 
 def choose_fouler_pid(
@@ -468,11 +589,23 @@ def choose_fouler_pid(
     def_on_court: Sequence[str],
     player_fouls: Dict[str, int],
     foul_out_limit: int,
+    outcome: Optional[str] = None,
 ) -> Optional[str]:
     """Choose a defender pid to be credited with a foul.
 
-    - Excludes players already at/over foul-out limit when possible.
-    - Does NOT mutate player_fouls; resolve layer remains responsible for bookkeeping.
+    Improvements:
+      - 6-A: weighted selection based on foul tendency proxies (stats + fatigue)
+      - 6-B: dynamic foul-trouble penalty so high-foul players are less likely to be assigned
+
+    Notes:
+      - Excludes players already at/over foul-out limit when possible.
+      - Does NOT mutate player_fouls; resolve layer remains responsible for bookkeeping.
+      - Tuning can be overridden via defense.tactics.context:
+          FOUL_WEIGHT_ALPHA (default 2.0)
+          FOUL_WEIGHT_MIN (default 0.05)
+          FOUL_TROUBLE_FREE (default 2)
+          FOUL_TROUBLE_K (default 0.60)
+          FOUL_TROUBLE_MIN_MULT (default 0.12)
     """
     cands = [pid for pid in (def_on_court or []) if isinstance(pid, str) and pid]
     if not cands:
@@ -482,5 +615,33 @@ def choose_fouler_pid(
     if not eligible:
         eligible = cands
 
-    # Keep simple (uniform) for now; can be upgraded later (e.g., physicality bias).
-    return rng.choice(list(eligible))
+    ctx = getattr(getattr(defense, 'tactics', None), 'context', {}) or {}
+    alpha = float(ctx.get('FOUL_WEIGHT_ALPHA', 2.0))
+    w_min = float(ctx.get('FOUL_WEIGHT_MIN', 0.05))
+
+    free_fouls = int(ctx.get('FOUL_TROUBLE_FREE', 2))
+    k = float(ctx.get('FOUL_TROUBLE_K', 0.60))
+    min_mult = float(ctx.get('FOUL_TROUBLE_MIN_MULT', 0.12))
+
+    weights: Dict[str, float] = {}
+    for pid in eligible:
+        p = defense.find_player(pid)
+        if p is None:
+            weights[pid] = 1.0
+            continue
+
+        score = _foul_tendency_score(p, outcome)
+        w_base = math.exp(alpha * (float(score) - 0.5))
+        w_base = max(float(w_base), float(w_min))
+
+        f = int(player_fouls.get(pid, 0))
+        f_adj = max(0, f - int(free_fouls))
+        trouble_mult = max(float(min_mult), math.exp(-float(k) * float(f_adj)))
+
+        weights[pid] = w_base * float(trouble_mult)
+
+    # Fallback: if something degenerated, keep legacy uniform behavior.
+    if sum(max(w, 0.0) for w in weights.values()) <= 1e-12:
+        return rng.choice(list(eligible))
+
+    return weighted_choice(rng, weights)
