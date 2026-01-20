@@ -22,6 +22,7 @@ from .era import get_mvp_rules, load_era_config
 from .sim_clock import apply_dead_ball_cost
 from .sim_fatigue import _apply_break_recovery, _apply_fatigue_loss
 from .sim_rotation import _get_on_court, _init_targets, _perform_rotation, _set_on_court, _update_minutes
+from .sim_timeout import ensure_timeout_state, maybe_timeout_deadball, update_timeout_trackers
 from .team_keys import AWAY, HOME, team_key
 from .sim_possession import simulate_possession
 
@@ -298,6 +299,8 @@ def simulate_game(
         targets_sec_home=targets_home,
         targets_sec_away=targets_away,
     )
+    # Initialize timeout state + flow trackers (safe no-ops if rules disable it)
+    ensure_timeout_state(game_state, rules)
     home.set_on_court(start_home)
     away.set_on_court(start_away)
 
@@ -382,6 +385,33 @@ def simulate_game(
             is_garbage = game_state.quarter == regulation_quarters and game_state.clock_sec <= 360 and abs(score_diff) >= 20
             variance_mult = 0.80 if is_clutch else 1.25 if is_garbage else 1.0
             tempo_mult = (1.0 / 1.08) if is_garbage else 1.0
+
+             # --- Dead-ball timeout phase (v1) ---
+             # Only attempts on dead-ball windows (start_q / after_score / after_tov_dead / after_foul).
+             # Does not consume game clock and does not affect shot clock (we only log the snapshot).
+             # NOTE: we intentionally do NOT change offense/defense here; timeout is a side event.
+             try:
+                 home_on = list(game_state.on_court_home or [])
+                 away_on = list(game_state.on_court_away or [])
+                 home_fmap = game_state.fatigue.get(HOME, {}) if isinstance(game_state.fatigue, dict) else {}
+                 away_fmap = game_state.fatigue.get(AWAY, {}) if isinstance(game_state.fatigue, dict) else {}
+                 avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
+                 avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
+                 maybe_timeout_deadball(
+                     rng,
+                     game_state,
+                     rules,
+                     pos_start=str(pos_start),
+                     next_offense_side=str(off_key),
+                     is_clutch=bool(is_clutch),
+                     avg_energy_home=float(avg_energy_home),
+                     avg_energy_away=float(avg_energy_away),
+                     home_team_id=home_team_id,
+                     away_team_id=away_team_id,
+                 )
+             except Exception:
+                 # Timeout logic must never break simulation.
+                 pass
 
             bonus_threshold = (
                 int(rules.get("overtime_bonus_threshold", rules.get("bonus_threshold", 5)))
@@ -546,6 +576,13 @@ def simulate_game(
             # Possession ended.
             pos_is_continuation = False
 
+             # Update timeout flow trackers only on true possession ends (not DEADBALL_STOP).
+             # This drives run/turnover-streak triggers for future dead-ball timeouts.
+             try:
+                 update_timeout_trackers(game_state, offense_side=str(off_key), pos_res=pos_res)
+             except Exception:
+                 pass
+
             total_possessions += 1
             game_state.score_home = home.pts
             game_state.score_away = away.pts
@@ -609,6 +646,13 @@ def simulate_game(
                     "bad_totals": {home.name: home.role_fit_bad_totals, away.name: away.role_fit_bad_totals},
                     "bad_by_grade": {home.name: home.role_fit_bad_by_grade, away.name: away.role_fit_bad_by_grade},
                 }
+                 "timeouts": {
+                     "remaining": _side_to_team_keyed(dict(getattr(game_state, "timeouts_remaining", {})), home_team_id, away_team_id),
+                     "used": _side_to_team_keyed(dict(getattr(game_state, "timeouts_used", {})), home_team_id, away_team_id),
+                     "run_pts_by_scoring_side": _side_to_team_keyed(dict(getattr(game_state, "run_pts_by_scoring_side", {})), home_team_id, away_team_id),
+                     "consecutive_team_tos": _side_to_team_keyed(dict(getattr(game_state, "consecutive_team_tos", {})), home_team_id, away_team_id),
+                     "log": list(getattr(game_state, "timeout_log", []) or []),
+                 },
             },
         },
         "possessions_per_team": max(home.possessions, away.possessions),
