@@ -11,7 +11,6 @@ import warnings
 from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .builders import (
-    build_defense_action_probs,
     build_offense_action_probs,
     build_outcome_priors,
     get_action_base,
@@ -602,13 +601,9 @@ def simulate_possession(
     off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
     off_probs = _apply_contextual_action_weights(off_probs)
     off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
-    def_probs = build_defense_action_probs(defense.tactics, game_cfg=game_cfg)
 
     action = choose_action_with_budget(rng, off_probs)
     offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
-
-    def_action = weighted_choice(rng, def_probs)
-    defense.def_action_counts[def_action] = defense.def_action_counts.get(def_action, 0) + 1
 
     tags = {
         "in_transition": (get_action_base(action, game_cfg) == "TransitionEarly"),
@@ -730,7 +725,6 @@ def simulate_possession(
             defense,
             tags,
             pass_chain,
-            def_action=def_action,
             ctx=ctx,
             game_state=game_state,
             game_cfg=game_cfg,
