@@ -373,13 +373,26 @@ def simulate_possession(
 
     Returns a dict describing how the possession ended so the game loop can be event-based.
     """
-    offense.possessions += 1
-    before_pts = int(offense.pts)
 
     if ctx is None:
         ctx = {}
     if game_cfg is None:
         raise ValueError("simulate_possession requires game_cfg")
+
+    # Possession-continuation support:
+    # Some dead-ball events (e.g. no-shot foul) can stop play and restart with the same offense.
+    # In those cases, the game loop will call simulate_possession again with ctx['_pos_continuation']=True.
+    # We must avoid double-counting possessions and must preserve possession-scope aggregates.
+    is_continuation = bool(ctx.get("_pos_continuation", False))
+    if not is_continuation:
+        offense.possessions += 1
+        before_pts = int(offense.pts)
+    else:
+        before_pts = int(ctx.get("_pos_before_pts", int(offense.pts)))
+
+    # Current segment start vs. possession-origin start (for attribution like fastbreak/points_off_tov).
+    pos_start = str(ctx.get("pos_start", ""))
+    pos_origin = str(ctx.get("_pos_origin_start", pos_start))
 
     def _record_ctx_error(where: str, exc: BaseException) -> None:
         try:
@@ -395,7 +408,7 @@ def simulate_possession(
 
     tempo_mult = float(ctx.get("tempo_mult", 1.0))
     time_costs = rules.get("time_costs", {})
-    had_orb = False
+    had_orb = bool(ctx.get("_pos_had_orb", False))
 
     # per-team style profile (persistent; increases team diversity)
     team_style = ensure_team_style(rng, offense, rules)
@@ -406,9 +419,8 @@ def simulate_possession(
         ctx["tempo_mult"] = tempo_mult
         ctx["team_style"] = team_style
 
-    # Dead-ball start can trigger inbound (score, quarter start, dead-ball TO, etc.)
-    pos_start = str(ctx.get("pos_start", ""))
-    dead_ball_starts = {"start_q", "after_score", "after_tov_dead"}
+    # Dead-ball start can trigger inbound (score, quarter start, dead-ball TO, no-shot foul restart, etc.)
+    dead_ball_starts = {"start_q", "after_score", "after_tov_dead", "after_foul"}
     if pos_start in dead_ball_starts:
         # dead-ball inbound attempt
         if simulate_inbound(rng, offense, defense, rules):
@@ -417,7 +429,7 @@ def simulate_possession(
                 "pos_start_next": "after_tov",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
 
@@ -690,7 +702,7 @@ def simulate_possession(
                 "pos_start_next": "after_tov_dead",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
         if clock_expired and _is_nonterminal_base(base_action_now):
@@ -700,7 +712,7 @@ def simulate_possession(
                 "pos_start_next": pos_start,
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
 
@@ -736,7 +748,7 @@ def simulate_possession(
                 "pos_start_next": "after_score",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
 
@@ -746,12 +758,14 @@ def simulate_possession(
                 "pos_start_next": "after_tov",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
 
         if term == "FOUL_NO_SHOTS":
-            # dead-ball stop, offense retains ball
+            # Dead-ball stop, offense retains ball.
+            # NOTE: We intentionally do NOT run the inbound here.
+            # The game loop may want to do substitutions / timeouts / UI stops between the whistle and inbound.
             stop_cost = float(time_costs.get("FoulStop", 0.0))
             if stop_cost > 0:
                 apply_dead_ball_cost(game_state, stop_cost, tempo_mult)
@@ -762,7 +776,7 @@ def simulate_possession(
                         "pos_start_next": "after_foul",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
-                        "pos_start": pos_start,
+                        "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
 
@@ -771,30 +785,16 @@ def simulate_possession(
             if game_state.shot_clock_sec < foul_reset:
                 game_state.shot_clock_sec = foul_reset
 
-            # inbound restart (can turnover)
-            if simulate_inbound(rng, offense, defense, rules):
-                return {
-                    "end_reason": "TURNOVER",
-                    "pos_start_next": "after_tov",
-                    "points_scored": int(offense.pts) - before_pts,
-                    "had_orb": had_orb,
-                    "pos_start": pos_start,
-                    "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                }
+            return {
+                "end_reason": "DEADBALL_STOP",
+                "deadball_reason": "FOUL_NO_SHOTS",
+                "pos_start_next": "after_foul",
+                "points_scored": int(offense.pts) - before_pts,
+                "had_orb": had_orb,
+                "pos_start": pos_origin,
+                "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+            }
 
-            # restart with set-play bias
-            ctx = dict(ctx)
-            ctx["pos_start"] = "after_foul"
-            ctx["dead_ball_inbound"] = True
-            off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
-            off_probs = _apply_contextual_action_weights(off_probs)
-            off_probs = apply_team_style_to_action_probs(off_probs, team_style, game_cfg)
-            action = choose_action_with_budget(rng, off_probs)
-            offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
-            _refresh_action_tags(action, tags)
-            pass_chain = 0
-            stall_steps = _bump_stall(stall_steps, sc0, gc0)
-            continue
 
 
         if term == "FOUL_FT":
@@ -805,7 +805,7 @@ def simulate_possession(
                     "pos_start_next": "after_score",
                     "points_scored": int(offense.pts) - before_pts,
                     "had_orb": had_orb,
-                    "pos_start": pos_start,
+                    "pos_start": pos_origin,
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     "ended_with_ft_trip": True,
                 }
@@ -841,7 +841,7 @@ def simulate_possession(
                 "pos_start_next": "after_drb",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                 "ended_with_ft_trip": True,
             }
@@ -876,7 +876,7 @@ def simulate_possession(
                 "pos_start_next": "after_drb",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
-                "pos_start": pos_start,
+                "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
             }
 
@@ -907,7 +907,7 @@ def simulate_possession(
                         "pos_start_next": "after_tov_dead",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
-                        "pos_start": pos_start,
+                        "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
                 if game_state.clock_sec <= 0:
@@ -917,7 +917,7 @@ def simulate_possession(
                         "pos_start_next": pos_start,
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
-                        "pos_start": pos_start,
+                        "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
             off_probs = build_offense_action_probs(offense.tactics, defense.tactics, ctx=ctx, game_cfg=game_cfg)
@@ -963,7 +963,7 @@ def simulate_possession(
                         "pos_start_next": "after_tov_dead",
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
-                        "pos_start": pos_start,
+                        "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
                 if game_state.clock_sec <= 0:
@@ -973,7 +973,7 @@ def simulate_possession(
                         "pos_start_next": pos_start,
                         "points_scored": int(offense.pts) - before_pts,
                         "had_orb": had_orb,
-                        "pos_start": pos_start,
+                        "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
 
@@ -1001,7 +1001,7 @@ def simulate_possession(
         "pos_start_next": pos_start,
         "points_scored": int(offense.pts) - before_pts,
         "had_orb": had_orb,
-        "pos_start": pos_start,
+        "pos_start": pos_origin,
         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
     }
 
