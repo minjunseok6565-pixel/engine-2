@@ -170,6 +170,70 @@ MVP_RULES = {
         "after_drb": 4.5,
         "after_tov": 6.0,
     },
+ 
+     # --- Timeouts (dead-ball only, v1) ---
+     "timeouts": {"per_team": 7},
+ 
+     "timeout_ai": {
+         "enabled": True,
+         "deadball_only": True,
+         # v1: allow either team to call timeout during dead-ball (simplifies TO-streak trigger realism)
+         "allow_both_teams_deadball": True,
+ 
+         # Cooldown in possessions (easy & stable)
+         "cooldown_possessions": 3,
+ 
+         # base probability (usually 0; triggers drive decisions)
+         "p_base": 0.00,
+ 
+         # Trigger G-1: stop opponent run (consecutive scoring points)
+         "run_pts_threshold": 8,
+         "run_pts_hard": 12,
+         "p_run": 0.30,
+ 
+         # Trigger G-2: "this is ugly" streak (same team consecutive turnovers)
+         "to_streak_threshold": 3,
+         "to_streak_hard": 4,
+         "p_to": 0.22,
+ 
+         # Optional secondary triggers (kept from earlier design; tune freely)
+         "p_clutch": 0.16,
+         "p_fatigue": 0.10,
+         "fatigue_threshold": 0.55,
+ 
+         # hard cap
+         "p_cap": 0.85,
+     },
+ 
+     "timeout_value": {
+         # H: timeouts are "more spendable" when you have many, less when you have few
+         "remaining_alpha": 0.70,
+ 
+         # H: blowout suppression (applies to both sides)
+         "blowout_soft": 10,
+         "blowout_hard": 18,
+         "blowout_floor": 0.30,
+ 
+         # H: score-bias asymmetry (losing team calls more; winning team calls less)
+         "trail_scale": 12.0,
+         "trail_k": 0.35,      # max +35% when trailing by >= trail_scale
+         "lead_scale": 12.0,
+         "lead_k": 0.35,       # max -35% when leading by >= lead_scale
+         "lead_floor": 0.55,   # don't go below this from lead bias alone
+ 
+         # H: late-game is more conservative
+         "late_beta": 0.50,    # linear downweight vs regulation progress
+         "late_floor": 0.60,
+     },
+ 
+     # Recovery is optional; default off for v1 (can enable later)
+     "timeout_recovery": {
+         "enabled": False,
+         # "equivalent break seconds" to apply as recovery effect
+         "equiv_break_sec": 12.0,
+         "on_court_mult": 1.0,
+         "bench_mult": 1.0,
+     },
 }
 
 DEFENSE_META_PARAMS = {
