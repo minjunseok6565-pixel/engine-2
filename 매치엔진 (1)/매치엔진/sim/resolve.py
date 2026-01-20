@@ -671,7 +671,7 @@ def resolve_outcome(
 
         # assign a random fouler from on-court defenders (MVP)
         if def_on_court:
-            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit)
+            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
                 if game_state is not None:
