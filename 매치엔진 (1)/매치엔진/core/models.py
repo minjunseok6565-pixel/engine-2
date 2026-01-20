@@ -109,7 +109,6 @@ class TeamState:
 
     # breakdowns
     off_action_counts: Dict[str, int] = field(default_factory=dict)
-    def_action_counts: Dict[str, int] = field(default_factory=dict)
     outcome_counts: Dict[str, int] = field(default_factory=dict)
 
     # player box
