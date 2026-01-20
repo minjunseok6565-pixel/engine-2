@@ -212,7 +212,6 @@ def summarize_team(
         "PossessionEndCounts": dict(team.possession_end_counts),
         "ShotZoneDetail": dict(team.shot_zone_detail),
         "OffActionCounts": dict(sorted(team.off_action_counts.items(), key=lambda x: -x[1])),
-        "DefActionCounts": dict(sorted(team.def_action_counts.items(), key=lambda x: -x[1])),
         "OutcomeCounts": dict(sorted(team.outcome_counts.items(), key=lambda x: -x[1])),
         "Players": team.player_stats,
         "PlayerBox": build_player_box(team, game_state, home=home),
