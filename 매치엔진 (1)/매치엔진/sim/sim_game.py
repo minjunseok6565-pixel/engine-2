@@ -474,7 +474,6 @@ def simulate_game(
                 }
                 setup_key = setup_map.get(pos_start, "possession_setup")
                 setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
-             if setup_cost > 0:
             # Late-clock guardrail: never allow dead-ball setup to delete the possession entirely.
             timing = rules.get("timing", {}) or {}
             try:
