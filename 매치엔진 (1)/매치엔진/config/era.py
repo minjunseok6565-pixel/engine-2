@@ -147,11 +147,23 @@ MVP_RULES = {
         "PostUp": 8.2,
         "HornsSet": 7.0,
         "SpotUp": 4.4,
+        "QuickShot": 1.2,
         "Cut": 4.6,
         "TransitionEarly": 4.0,
         "Kickout": 2.8,
         "ExtraPass": 3.0,
         "Reset": 4.5,
+    },
+
+    "timing": {
+        "min_release_window": 0.7,
+        "urgent_budget_sec": 8.0,
+        "quickshot_cost_sec": 1.2,
+        "soft_slack_span": 4.0,
+        "soft_slack_floor": 0.20,
+        "quickshot_inject_base": 0.05,
+        "quickshot_inject_urgency_mult": 0.35,
+        "pass_reset_suppress_urgency": 0.85
     },
     
     "transition_weight_mult": {
