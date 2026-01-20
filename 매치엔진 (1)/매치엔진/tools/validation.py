@@ -115,7 +115,7 @@ def build_allowed_sets(game_cfg: "GameConfig") -> AllowedSets:
     defense_actions: set[str] = set()
     outcomes: set[str] = set()
     offense_schemes = set(game_cfg.off_scheme_action_weights.keys())
-    defense_schemes = set(game_cfg.def_scheme_action_weights.keys())
+    defense_schemes = set(game_cfg.def_scheme_action_weights.keys()) | set(getattr(game_cfg, "defense_scheme_mult", {}).keys())
 
     for scheme in game_cfg.off_scheme_action_weights.values():
         if isinstance(scheme, Mapping):
@@ -300,13 +300,6 @@ def sanitize_tactics_config(
     )
 
     # Defense multipliers
-    tac.def_action_weight_mult = _sanitize_mult_dict(
-        tac.def_action_weight_mult,
-        allowed.defense_actions,
-        cfg,
-        report,
-        f"{label}.def_action_weight_mult",
-    )
     tac.opp_action_weight_mult = _sanitize_mult_dict(
         getattr(tac, "opp_action_weight_mult", {}),
         allowed.offense_actions,
