@@ -333,7 +333,6 @@ DEFAULT_ERA: Dict[str, Any] = {
     "action_aliases": dict(ACTION_ALIASES),
 
     "off_scheme_action_weights": copy.deepcopy(OFF_SCHEME_ACTION_WEIGHTS),
-    "def_scheme_action_weights": copy.deepcopy(DEF_SCHEME_ACTION_WEIGHTS),
 
     "offense_scheme_mult": copy.deepcopy(OFFENSE_SCHEME_MULT),
     "defense_scheme_mult": copy.deepcopy(DEFENSE_SCHEME_MULT),
