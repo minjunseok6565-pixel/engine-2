@@ -582,12 +582,12 @@ def simulate_game(
             # Possession ended.
             pos_is_continuation = False
 
-             # Update timeout flow trackers only on true possession ends (not DEADBALL_STOP).
-             # This drives run/turnover-streak triggers for future dead-ball timeouts.
-             try:
-                 update_timeout_trackers(game_state, offense_side=str(off_key), pos_res=pos_res)
-             except Exception:
-                 pass
+            # Update timeout flow trackers only on true possession ends (not DEADBALL_STOP).
+            # This drives run/turnover-streak triggers for future dead-ball timeouts.
+            try:
+                update_timeout_trackers(game_state, offense_side=str(off_key), pos_res=pos_res)
+            except Exception:
+                pass
 
             total_possessions += 1
             game_state.score_home = home.pts
