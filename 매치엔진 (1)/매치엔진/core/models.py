@@ -39,18 +39,18 @@ class GameState:
     targets_sec_home: Dict[str, int] = field(default_factory=dict)
     targets_sec_away: Dict[str, int] = field(default_factory=dict)
 
-     # --- Timeouts (dead-ball only, v1) ---
-     timeouts_remaining: Dict[str, int] = field(default_factory=dict)
-     timeouts_used: Dict[str, int] = field(default_factory=dict)
-     timeout_last_possession: Dict[str, int] = field(default_factory=dict)
-     timeout_log: List[Dict[str, Any]] = field(default_factory=list)
+    # --- Timeouts (dead-ball only, v1) ---
+    timeouts_remaining: Dict[str, int] = field(default_factory=dict)
+    timeouts_used: Dict[str, int] = field(default_factory=dict)
+    timeout_last_possession: Dict[str, int] = field(default_factory=dict)
+    timeout_log: List[Dict[str, Any]] = field(default_factory=list)
  
-     # --- Flow trackers for timeout AI ---
-     # Run is tracked as "consecutive scoring points by the same side" (no opponent score in between).
-     run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)
-     # Consecutive team turnovers are tracked per-team possessions (only updates when that team is on offense).
-     consecutive_team_tos: Dict[str, int] = field(default_factory=dict)
-     last_scoring_side: Optional[str] = None
+    # --- Flow trackers for timeout AI ---
+    # Run is tracked as "consecutive scoring points by the same side" (no opponent score in between).
+    run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)
+    # Consecutive team turnovers are tracked per-team possessions (only updates when that team is on offense).
+    consecutive_team_tos: Dict[str, int] = field(default_factory=dict)
+    last_scoring_side: Optional[str] = None
 
 @dataclass
 class Player:
