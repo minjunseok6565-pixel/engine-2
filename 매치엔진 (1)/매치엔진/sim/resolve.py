@@ -206,7 +206,6 @@ def resolve_outcome(
     defense: TeamState,
     tags: Dict[str, Any],
     pass_chain: int,
-    def_action: str,
     ctx: Optional[Dict[str, Any]] = None,
     game_state: Optional[GameState] = None,
     game_cfg: Optional["GameConfig"] = None,
