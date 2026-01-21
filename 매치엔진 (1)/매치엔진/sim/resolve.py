@@ -401,7 +401,7 @@ def resolve_outcome(
         if zone_detail:
             offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
             offense.shot_zone_detail[zone_detail]["FGA"] += 1
-        if game_state is not None and "first_fga_shotclock_sec" not in ctx:
+        if game_state is not None and ctx.get("first_fga_shotclock_sec") is None:
             ctx["first_fga_shotclock_sec"] = float(game_state.shot_clock_sec)
         offense.add_player_stat(actor.pid, "FGA", 1)
         if pts == 3:
@@ -803,7 +803,7 @@ def resolve_outcome(
                 if zone_detail:
                     offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
                     offense.shot_zone_detail[zone_detail]["FGA"] += 1
-                if game_state is not None and "first_fga_shotclock_sec" not in ctx:
+                if game_state is not None and ctx.get("first_fga_shotclock_sec") is None:
                     ctx["first_fga_shotclock_sec"] = float(game_state.shot_clock_sec)
                 if pts == 3:
                     offense.tpa += 1
