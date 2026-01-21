@@ -311,6 +311,37 @@ def simulate_game(
     replay_token = ""
     debug_errors: List[Dict[str, Any]] = []
 
+    # Dead-ball windows where substitutions are allowed.
+    # NOTE: start_q is treated as a dead-ball window ONLY for Q2+ (and OT),
+    # not for the opening tip (Q1 start), to avoid subbing starters before any play.
+    DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul")
+
+    def _maybe_open_sub_window_deadball(
+        q_index: int,
+        pos_start: str,
+        is_garbage: bool,
+        timeout_evt: Optional[Dict[str, Any]],
+    ) -> None:
+        """
+        Substitution-eligibility window (dead-ball only).
+
+        This function is the single choke-point where "subs are allowed" in the engine.
+        For now, we call the existing _perform_rotation() so the game remains playable.
+        Later, you can replace these calls with your own rotation/substitution logic.
+        """
+        ps = str(pos_start)
+        if ps not in DEADBALL_SUB_STARTS and not timeout_evt:
+            return
+        # Skip Q1 opening dead-ball (before any possession has happened).
+        if ps == "start_q" and q_index == 0 and total_possessions == 0:
+            return
+        try:
+            _perform_rotation(rng, home, home, game_state, rules, is_garbage)
+            _perform_rotation(rng, away, home, game_state, rules, is_garbage)
+        except Exception:
+            # Sub logic must never break simulation.
+            pass
+
     def _play_period(q: int, period_length_sec: float) -> None:
         nonlocal total_possessions, replay_token
         game_state.quarter = q + 1
@@ -356,30 +387,7 @@ def simulate_game(
                 pos_origin_start = str(pos_start)
                 pos_first_fga_sc = None
 
-            off_on_court = _get_on_court(game_state, offense, home)
-            def_on_court = _get_on_court(game_state, defense, home)
-
-            offense.set_on_court(off_on_court)
-            defense.set_on_court(def_on_court)
-            off_on_court = list(offense.on_court_pids)
-            def_on_court = list(defense.on_court_pids)
-
-            off_players = offense.on_court_players()
-            def_players = defense.on_court_players()
-            off_key = team_key(offense, home)
-            def_key = team_key(defense, home)
-            off_fatigue_map = game_state.fatigue.setdefault(off_key, {})
-            def_fatigue_map = game_state.fatigue.setdefault(def_key, {})
-
-            for p in off_players:
-                p.energy = clamp(off_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
-            for p in def_players:
-                p.energy = clamp(def_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
-
-            avg_off_fatigue = sum(off_fatigue_map.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
-            avg_def_fatigue = sum(def_fatigue_map.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
-            def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
-
+            # Game context that does NOT depend on the on-court lineup.
             score_diff = home.pts - away.pts
             is_clutch = game_state.quarter >= regulation_quarters and game_state.clock_sec <= 120 and abs(score_diff) <= 8
             is_garbage = game_state.quarter == regulation_quarters and game_state.clock_sec <= 360 and abs(score_diff) >= 20
@@ -390,6 +398,7 @@ def simulate_game(
             # Only attempts on dead-ball windows (start_q / after_score / after_tov_dead / after_foul).
             # Does not consume game clock and does not affect shot clock (we only log the snapshot).
             # NOTE: we intentionally do NOT change offense/defense here; timeout is a side event.
+            timeout_evt = None
             try:
                 home_on = list(game_state.on_court_home or [])
                 away_on = list(game_state.on_court_away or [])
@@ -418,6 +427,46 @@ def simulate_game(
             except Exception:
                 # Timeout logic must never break simulation.
                 pass
+
+            # --- Substitution window (dead-ball only, 8-A ready) ---
+            # Substitutions are allowed ONLY on dead-ball windows:
+            #   - after_score
+            #   - after_tov_dead (dead-ball turnovers: inbound/charge/shot-clock, per prior patch)
+            #   - after_foul (DEADBALL_STOP continuation)
+            #   - start_q (between quarters / OT; Q1 opening tip is excluded)
+            #
+            # This runs AFTER timeout recovery so the rotation/sub logic can see updated energy.
+            _maybe_open_sub_window_deadball(
+                q_index=q,
+                pos_start=str(pos_start),
+                is_garbage=bool(is_garbage),
+                timeout_evt=timeout_evt if isinstance(timeout_evt, dict) else None,
+            )
+
+            # Now (after potential substitutions), re-read the actual on-court lineups and compute fatigue context.
+            off_on_court = _get_on_court(game_state, offense, home)
+            def_on_court = _get_on_court(game_state, defense, home)
+
+            offense.set_on_court(off_on_court)
+            defense.set_on_court(def_on_court)
+            off_on_court = list(offense.on_court_pids)
+            def_on_court = list(defense.on_court_pids)
+
+            off_players = offense.on_court_players()
+            def_players = defense.on_court_players()
+            off_key = team_key(offense, home)
+            def_key = team_key(defense, home)
+            off_fatigue_map = game_state.fatigue.setdefault(off_key, {})
+            def_fatigue_map = game_state.fatigue.setdefault(def_key, {})
+
+            for p in off_players:
+                p.energy = clamp(off_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
+            for p in def_players:
+                p.energy = clamp(def_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
+
+            avg_off_fatigue = sum(off_fatigue_map.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
+            avg_def_fatigue = sum(def_fatigue_map.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
+            def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
 
             bonus_threshold = (
                 int(rules.get("overtime_bonus_threshold", rules.get("bonus_threshold", 5)))
@@ -575,8 +624,11 @@ def simulate_game(
                         f"({type(exc).__name__}: {exc})"
                     )
 
-            _perform_rotation(rng, offense, home, game_state, rules, is_garbage)
-            _perform_rotation(rng, defense, home, game_state, rules, is_garbage)
+            # --- NOTE (8-A): substitutions are NOT allowed here anymore ---
+            # Previously, we rotated after every possession end, which could cause unrealistic
+            # "robotic" per-possession substitutions (including live-ball DRB/steal transitions).
+            #
+            # Substitution eligibility is handled ONLY in the dead-ball window at the top of the loop.
 
             # Possession ended.
             pos_is_continuation = False
