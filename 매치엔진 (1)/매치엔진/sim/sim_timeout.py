@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import random
 from typing import Any, Dict, Optional, Tuple
 
@@ -97,7 +96,7 @@ def maybe_timeout_deadball(
     rules: Dict[str, Any],
     pos_start: str,
     next_offense_side: str,
-    is_clutch: bool,
+    pressure_index: float,
     avg_energy_home: float,
     avg_energy_away: float,
     home_team_id: Optional[str] = None,
@@ -142,7 +141,7 @@ def maybe_timeout_deadball(
             per_team=per_team,
             game_state=game_state,
             rules=rules,
-            is_clutch=bool(is_clutch),
+            pressure_index=float(pressure_index),
             avg_energy_home=float(avg_energy_home),
             avg_energy_away=float(avg_energy_away),
         )
@@ -214,7 +213,7 @@ def _compute_timeout_probability(
     per_team: int,
     game_state: Any,
     rules: Dict[str, Any],
-    is_clutch: bool,
+    pressure_index: float,
     avg_energy_home: float,
     avg_energy_away: float,
 ) -> Tuple[float, str]:
@@ -246,7 +245,14 @@ def _compute_timeout_probability(
         p_to_term = p_to * s
 
     # --- Secondary triggers ---
-    p_clutch = float(ai.get("p_clutch", 0.0)) if is_clutch else 0.0
+    # Pressure-driven timeouts (continuous 0..1; replaces legacy is_clutch boolean)
+    p_pressure = float(ai.get("p_pressure", 0.0))
+    p_pressure_term = 0.0
+    if p_pressure > 0:
+        pr = clamp(float(pressure_index), 0.0, 1.0)
+        if pr > 0:
+            # Linear scaling by default; keep simple and predictable.
+            p_pressure_term = p_pressure * pr
 
     fatigue_thr = float(ai.get("fatigue_threshold", 0.55))
     p_fatigue = float(ai.get("p_fatigue", 0.0))
@@ -265,8 +271,8 @@ def _compute_timeout_probability(
         base_p, reason = p_run_term, "run"
     if p_to_term > base_p:
         base_p, reason = p_to_term, "to_streak"
-    if p_clutch > base_p:
-        base_p, reason = p_clutch, "clutch"
+    if p_pressure_term > base_p:
+        base_p, reason = p_pressure_term, "pressure"
     if p_fatigue_term > base_p:
         base_p, reason = p_fatigue_term, "fatigue"
 
