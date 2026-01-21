@@ -316,7 +316,7 @@ def simulate_game(
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
     DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul")
 
-    # Context indices (replace legacy is_clutch/is_garbage bool flags).
+    # Context indices (continuous late-game context scaling).
     # These are continuous (0..1) so downstream systems can react smoothly rather than
     # flipping behavior at hard time/score thresholds.
     ctx_idx = rules.get("context_indices", {}) or {}
