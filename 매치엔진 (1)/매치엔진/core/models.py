@@ -8,6 +8,84 @@ import warnings
 from .core import clamp
 
 
+# ---------------------------------------------------------------------------
+# Fatigue scaling (Issue #9)
+#
+# 목표
+# - 9-A: 피로 곡선을 더 강하게(비선형) 만들어, 낮은 energy에서 체감이 확 커지게
+# - 9-B: 스탯별 피로 민감도 차등(수비/핸들/패스/3점 더 민감, 포스트/피지컬 덜 민감)
+#
+# 적용 방식
+# - scale = floor + (1 - floor) * (energy ** gamma)
+#   (energy=1이면 1.0, energy=0이면 floor까지 하락)
+# - 스탯 키(key)에 따라 (floor, gamma) 프로필을 다르게 선택
+# ---------------------------------------------------------------------------
+
+# Base profile (대부분의 스탯)
+FATIGUE_PROFILE_BASE = {"floor": 0.78, "gamma": 1.9}
+
+# High sensitivity (피로 영향 큼): 수비/핸들/패스/3점
+FATIGUE_PROFILE_HIGH = {"floor": 0.74, "gamma": 2.2}
+
+# Low sensitivity (피로 영향 적음): 포스트/피지컬
+FATIGUE_PROFILE_LOW = {"floor": 0.84, "gamma": 1.6}
+
+# Exact key overrides (정확히 이 키면 우선 적용)
+_FATIGUE_HIGH_EXACT = {
+    "DEF_POA", "DEF_STEAL", "DEF_HELP", "DEF_RIM",
+    "HANDLE_SAFE", "PASS_SAFE", "PASS_CREATE", "PNR_READ",
+}
+_FATIGUE_LOW_EXACT = {
+    "PHYSICAL",
+    "POST_CONTROL", "POST_SCORE",
+    "DEF_POST",
+}
+
+
+def _fatigue_profile_for_key(key: str):
+    """
+    스탯 키에 따라 피로 프로필을 선택한다.
+    - exact override 우선
+    - 그 다음 prefix 기반 그룹핑
+    - 마지막에 base
+    """
+    if not key:
+        return FATIGUE_PROFILE_BASE
+
+    # Exact overrides first
+    if key in _FATIGUE_HIGH_EXACT:
+        return FATIGUE_PROFILE_HIGH
+    if key in _FATIGUE_LOW_EXACT:
+        return FATIGUE_PROFILE_LOW
+
+    # Prefix grouping (새 derived 키가 추가되어도 동작)
+    if key.startswith("DEF_"):
+        return FATIGUE_PROFILE_HIGH
+    if key.startswith("HANDLE") or key.startswith("PASS_"):
+        return FATIGUE_PROFILE_HIGH
+    if key.startswith("SHOT_3"):
+        return FATIGUE_PROFILE_HIGH
+    if key.startswith("POST_") or key.startswith("PHYS"):
+        return FATIGUE_PROFILE_LOW
+
+    return FATIGUE_PROFILE_BASE
+
+
+def _fatigue_scale(key: str, energy: float) -> float:
+    """
+    energy(0..1)에 따른 스탯 배율(0..1)을 계산한다.
+    9-A(비선형) + 9-B(스탯별 차등)
+    """
+    e = clamp(float(energy), 0.0, 1.0)
+    prof = _fatigue_profile_for_key(key)
+    floor = float(prof["floor"])
+    gamma = float(prof["gamma"])
+
+    # 9-A nonlinear curve: floor + (1-floor) * (energy^gamma)
+    scale = floor + (1.0 - floor) * (e ** gamma)
+    return clamp(scale, 0.0, 1.0)
+
+
 def _default_possession_end_counts() -> Dict[str, int]:
     return {"FGA": 0, "TOV": 0, "FT_TRIP": 0, "OTHER": 0}
 
@@ -65,16 +143,8 @@ class Player:
         if not fatigue_sensitive:
             return v
 
-        # 단일 피로 스케일(0..1 에너지)을 능력치에 반영
-        e = clamp(float(getattr(self, "energy", 1.0)), 0.0, 1.0)
-
-        # energy=1.0 -> 1.00, energy=0.0 -> floor (기존 0.82 유지)
-        floor = 0.82
-        gamma = 1.35  # (선택) 피로가 후반에 더 급격히 체감되게 하는 커브. 원하면 1.0(선형)로.
-
-        severity = (1.0 - e) ** gamma
-        f = 1.0 - severity * (1.0 - floor)
-        return v * f
+        # 더 강한 비선형 피로 + 스탯별 민감도 차등
+        return v * _fatigue_scale(key, getattr(self, "energy", 1.0))
 
 @dataclass
 class TeamState:
