@@ -61,11 +61,17 @@ def build_offense_action_probs(
             base[a] = base.get(a, 0.5) * float(m)
 
     context = ctx or {}
-    if context.get("is_clutch"):
-        base["PnR"] = base.get("PnR", 0.5) * 1.05
-        base["Drive"] = base.get("Drive", 0.5) * 1.05
-        base["TransitionEarly"] = base.get("TransitionEarly", 0.5) * 0.90
-
+    # Pressure-driven action mix (continuous 0..1). Replaces legacy boolean clutch flag.
+    # At high pressure: slightly more on-ball creation (PnR/Drive), slightly less early transition.
+    try:
+        p = clamp(float(context.get("pressure_index", 0.0)), 0.0, 1.0)
+    except Exception:
+        p = 0.0
+    if p > 0.0:
+        base["PnR"] = base.get("PnR", 0.5) * (1.0 + 0.05 * p)
+        base["Drive"] = base.get("Drive", 0.5) * (1.0 + 0.05 * p)
+        base["TransitionEarly"] = base.get("TransitionEarly", 0.5) * (1.0 - 0.10 * p)
+        
     # possession-start context tweaks (event-based possession start)
     pos_start = str(context.get("pos_start", ""))
     if pos_start == "after_drb":
