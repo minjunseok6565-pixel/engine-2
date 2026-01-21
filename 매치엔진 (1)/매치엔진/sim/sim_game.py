@@ -21,7 +21,14 @@ from .era import get_mvp_rules, load_era_config
 
 from .sim_clock import apply_dead_ball_cost
 from .sim_fatigue import _apply_break_recovery, _apply_fatigue_loss
-from .sim_rotation import _get_on_court, _init_targets, _perform_rotation, _set_on_court, _update_minutes
+from .sim_rotation import (
+    _get_on_court,
+    _init_targets,
+    _set_on_court,
+    _update_minutes,
+    ensure_rotation_v1_state,
+    maybe_substitute_deadball_v1,
+)
 from .sim_timeout import ensure_timeout_state, maybe_timeout_deadball, update_timeout_trackers
 from .team_keys import AWAY, HOME, team_key
 from .sim_possession import simulate_possession
@@ -299,6 +306,7 @@ def simulate_game(
         targets_sec_home=targets_home,
         targets_sec_away=targets_away,
     )
+    ensure_rotation_v1_state(game_state, home, away, rules)
     # Initialize timeout state + flow trackers (safe no-ops if rules disable it)
     ensure_timeout_state(game_state, rules)
     home.set_on_court(start_home)
@@ -316,46 +324,10 @@ def simulate_game(
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
     DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul")
 
-    # Context indices (continuous late-game context scaling).
-    # These are continuous (0..1) so downstream systems can react smoothly rather than
-    # flipping behavior at hard time/score thresholds.
-    ctx_idx = rules.get("context_indices", {}) or {}
-    try:
-        ppp_est = float(ctx_idx.get("ppp_estimate", ctx_idx.get("ppp", 1.10)))
-    except Exception:
-        ppp_est = 1.10
-    ppp_est = max(ppp_est, 0.50)
-
-    try:
-        pressure_window_sec = float(ctx_idx.get("pressure_window_sec", 180.0))
-    except Exception:
-        pressure_window_sec = 180.0
-    pressure_window_sec = max(pressure_window_sec, 1.0)
-    try:
-        pressure_poss_close = float(ctx_idx.get("pressure_poss_close", 3.0))
-    except Exception:
-        pressure_poss_close = 3.0
-    pressure_poss_close = max(pressure_poss_close, 0.50)
-
-    try:
-        garbage_window_sec = float(ctx_idx.get("garbage_window_sec", 360.0))
-    except Exception:
-        garbage_window_sec = 360.0
-    garbage_window_sec = max(garbage_window_sec, 1.0)
-    try:
-        garbage_poss_start = float(ctx_idx.get("garbage_poss_start", 6.0))
-    except Exception:
-        garbage_poss_start = 6.0
-    try:
-        garbage_poss_full = float(ctx_idx.get("garbage_poss_full", 9.0))
-    except Exception:
-        garbage_poss_full = 9.0
-    if garbage_poss_full <= garbage_poss_start:
-        garbage_poss_full = garbage_poss_start + 1.0
-
     def _maybe_open_sub_window_deadball(
         q_index: int,
         pos_start: str,
+        pressure_index: float,
         garbage_index: float,
         timeout_evt: Optional[Dict[str, Any]],
     ) -> None:
@@ -373,8 +345,28 @@ def simulate_game(
         if ps == "start_q" and q_index == 0 and total_possessions == 0:
             return
         try:
-            _perform_rotation(rng, home, home, game_state, rules, float(garbage_index))
-            _perform_rotation(rng, away, home, game_state, rules, float(garbage_index))
+            maybe_substitute_deadball_v1(
+                rng,
+                home,
+                home,
+                game_state,
+                rules,
+                q_index=int(q_index),
+                pos_start=str(pos_start),
+                pressure_index=float(pressure_index),
+                garbage_index=float(garbage_index),
+            )
+            maybe_substitute_deadball_v1(
+                rng,
+                away,
+                home,
+                game_state,
+                rules,
+                q_index=int(q_index),
+                pos_start=str(pos_start),
+                pressure_index=float(pressure_index),
+                garbage_index=float(garbage_index),
+            )
         except Exception:
             # Sub logic must never break simulation.
             pass
@@ -426,21 +418,67 @@ def simulate_game(
 
             # Game context that does NOT depend on the on-court lineup.
             score_diff = home.pts - away.pts
-            # Continuous late-game indices (0..1)
-            # - pressure_index: higher when time is short AND the game is within a few possessions
-            # - garbage_index: higher when time is short AND the lead is a large number of possessions
-            poss_margin = abs(float(score_diff)) / float(ppp_est)
-            pressure_index = 0.0
-            garbage_index = 0.0
+            # Continuous late-game indices (v1.0):
+            # - pressure_index: clutch pressure (0..1), smoothed via EMA
+            # - garbage_index: garbage time (0..1), smoothed via EMA (regulation 4Q only; OT is forced 0)
+            poss_diff = abs(float(score_diff)) / 3.0  # 3 points ~= 1 possession
+
+            pressure_raw = 0.0
             if int(game_state.quarter) >= int(regulation_quarters):
-                t_pressure = clamp((float(pressure_window_sec) - float(game_state.clock_sec)) / float(pressure_window_sec), 0.0, 1.0)
-                close = 1.0 - clamp(float(poss_margin) / float(pressure_poss_close), 0.0, 1.0)
-                pressure_index = float(t_pressure) * float(close)
+                time_pressure = math.sqrt(
+                    clamp((300.0 - float(game_state.clock_sec)) / 300.0, 0.0, 1.0)
+                )
+                score_pressure = 1.0 / (1.0 + (poss_diff / 4.0) ** 2)
+                pressure_raw = float(time_pressure) * float(score_pressure)
+                if int(game_state.quarter) > int(regulation_quarters):
+                    pressure_raw = min(1.0, float(pressure_raw) + 0.15)
+
+            garbage_raw = 0.0
             if int(game_state.quarter) == int(regulation_quarters):
-                t_garbage = clamp((float(garbage_window_sec) - float(game_state.clock_sec)) / float(garbage_window_sec), 0.0, 1.0)
-                denom = max(float(garbage_poss_full) - float(garbage_poss_start), 1e-6)
-                blowout = clamp((float(poss_margin) - float(garbage_poss_start)) / denom, 0.0, 1.0)
-                garbage_index = float(t_garbage) * float(blowout)
+                time_garb = math.sqrt(
+                    clamp((360.0 - float(game_state.clock_sec)) / 360.0, 0.0, 1.0)
+                )
+                x = float(poss_diff) / 4.5
+                score_garb = (x * x) / (1.0 + x * x)
+                garbage_raw = float(time_garb) * float(score_garb)
+
+            prev_p = float(getattr(game_state, "pressure_smoothed", 0.0))
+            prev_g = float(getattr(game_state, "garbage_smoothed", 0.0))
+            game_state.pressure_smoothed = 0.75 * prev_p + 0.25 * float(pressure_raw)
+            game_state.garbage_smoothed = 0.75 * prev_g + 0.25 * float(garbage_raw)
+
+            pressure_index = float(game_state.pressure_smoothed)
+            garbage_index = float(game_state.garbage_smoothed)
+
+            # Dominant mode hysteresis (prevents CLUTCH/GARBAGE flicker).
+            prev_mode = str(getattr(game_state, "dominant_mode", "NEUTRAL") or "NEUTRAL")
+            mode = prev_mode
+            if float(pressure_index) >= float(garbage_index) + 0.08:
+                mode = "CLUTCH"
+            elif float(garbage_index) >= float(pressure_index) + 0.08:
+                mode = "GARBAGE"
+            game_state.dominant_mode = mode
+
+            # Level hysteresis (STRONG/MID/OFF) for each index.
+            prev_cl = str(getattr(game_state, "clutch_level", "OFF") or "OFF")
+            clutch_level = "OFF"
+            if float(pressure_index) >= 0.70 or (prev_cl == "STRONG" and float(pressure_index) >= 0.55):
+                clutch_level = "STRONG"
+            elif float(pressure_index) >= 0.40 or (
+                prev_cl in ("MID", "STRONG") and float(pressure_index) >= 0.30
+            ):
+                clutch_level = "MID"
+            game_state.clutch_level = clutch_level
+
+            prev_gl = str(getattr(game_state, "garbage_level", "OFF") or "OFF")
+            garbage_level = "OFF"
+            if float(garbage_index) >= 0.70 or (prev_gl == "STRONG" and float(garbage_index) >= 0.55):
+                garbage_level = "STRONG"
+            elif float(garbage_index) >= 0.45 or (
+                prev_gl in ("MID", "STRONG") and float(garbage_index) >= 0.35
+            ):
+                garbage_level = "MID"
+            game_state.garbage_level = garbage_level
 
             # Legacy knobs: keep neutral for now (new behavior should be driven by indices).
             variance_mult = 1.0
@@ -492,6 +530,7 @@ def simulate_game(
             _maybe_open_sub_window_deadball(
                 q_index=q,
                 pos_start=str(pos_start),
+                pressure_index=float(pressure_index),
                 garbage_index=float(garbage_index),
                 timeout_evt=timeout_evt if isinstance(timeout_evt, dict) else None,
             )
