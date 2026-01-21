@@ -245,7 +245,7 @@ def _compute_timeout_probability(
         p_to_term = p_to * s
 
     # --- Secondary triggers ---
-    # Pressure-driven timeouts (continuous 0..1; replaces legacy is_clutch boolean)
+    # Pressure-driven timeouts (continuous 0..1).
     p_pressure = float(ai.get("p_pressure", 0.0))
     p_pressure_term = 0.0
     if p_pressure > 0:
