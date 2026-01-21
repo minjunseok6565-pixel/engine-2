@@ -164,6 +164,23 @@ MVP_RULES = {
         "quickshot_inject_urgency_mult": 0.35,
         "pass_reset_suppress_urgency": 0.85
     },
+
+    # --- Context indices (continuous; replaces legacy is_clutch/is_garbage flags) ---
+    # Used by sim_game.py to compute pressure_index / garbage_index in [0..1].
+    # Tune to get the *feel* you want without hard mode switches.
+    "context_indices": {
+        # Points per possession estimate for converting score margin -> possession margin
+        "ppp_estimate": 1.10,
+
+        # Pressure (late-game, close): time window and "close" threshold in possessions
+        "pressure_window_sec": 180.0,
+        "pressure_poss_close": 3.0,
+
+        # Garbage (late-game, blowout): time window and blowout band (start -> full) in possessions
+        "garbage_window_sec": 360.0,
+        "garbage_poss_start": 6.0,
+        "garbage_poss_full": 9.0,
+    },
     
     "transition_weight_mult": {
         "default": 1.0,
@@ -196,8 +213,8 @@ MVP_RULES = {
          "to_streak_hard": 4,
          "p_to": 0.22,
  
-         # Optional secondary triggers (kept from earlier design; tune freely)
-         "p_clutch": 0.16,
+         # Optional secondary triggers (tune freely)
+         "p_pressure": 0.16,
          "p_fatigue": 0.10,
          "fatigue_threshold": 0.55,
  
