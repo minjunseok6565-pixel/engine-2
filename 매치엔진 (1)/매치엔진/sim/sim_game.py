@@ -324,6 +324,10 @@ def simulate_game(
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
     DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul")
 
+    # Team side keys used by timeout/rotation trackers and debug helpers.
+    home_team_id = HOME
+    away_team_id = AWAY
+
     def _maybe_open_sub_window_deadball(
         q_index: int,
         pos_start: str,
