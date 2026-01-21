@@ -26,6 +26,7 @@ from .resolve import (
     rebound_orb_probability,
     resolve_outcome,
 )
+from .sim_rotation import maybe_substitute_deadball_v1
 from .role_fit import apply_role_fit_to_priors_and_tags
 
 from .sim_clock import (
@@ -883,8 +884,48 @@ def simulate_possession(
                     "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     "ended_with_ft_trip": True,
                 }
+                
 
             # last FT missed -> live rebound
+            # Before we select a rebounder, force foul-out substitutions NOW so a fouled-out player
+            # cannot remain in the rebounder candidate pool.
+            try:
+                def_key = str(ctx.get("def_team_key") or "")
+                foul_out = int(ctx.get("foul_out", rules.get("foul_out", 6)))
+                pf_map = (game_state.player_fouls.get(def_key, {}) or {}) if def_key else {}
+
+                forced_out = [
+                    pid for pid in list(getattr(defense, "on_court_pids", []) or [])
+                    if int(pf_map.get(pid, 0)) >= foul_out
+                ]
+
+                if forced_out:
+                    # Infer which TeamState is the "home" team for sim_rotation helpers.
+                    # ctx keys are "home"/"away" (see team_keys.py).
+                    home_team = offense if str(ctx.get("off_team_key")) == "home" else defense
+
+                    maybe_substitute_deadball_v1(
+                        rng,
+                        defense,
+                        home_team,
+                        game_state,
+                        rules,
+                        q_index=max(0, int(getattr(game_state, "quarter", 1)) - 1),
+                        pos_start="after_foul",
+                        pressure_index=float(ctx.get("pressure_index", 0.0)),
+                        garbage_index=float(ctx.get("garbage_index", 0.0)),
+                    )
+
+                    # IMPORTANT: sim_rotation updates GameState on-court lists.
+                    # Sync TeamState on-court pids so rebound selection uses the updated lineup.
+                    if def_key == "home":
+                        defense.set_on_court(list(getattr(game_state, "on_court_home", []) or []))
+                    elif def_key == "away":
+                        defense.set_on_court(list(getattr(game_state, "on_court_away", []) or []))
+            except Exception:
+                # Forced-sub logic must never break simulation.
+                pass
+
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0)) * float(rules.get("ft_orb_mult", 0.75))
             drb_mult = float(defense.tactics.context.get("DRB_MULT", 1.0))
             p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
