@@ -38,6 +38,53 @@ from .sim_clock import (
 if TYPE_CHECKING:
     from config.game_config import GameConfig
 
+#
+# Turnover deadball/liveball classification
+# ---------------------------------------
+# These are the ONLY turnover outcome strings emitted by resolve_outcome()/sim_clock in this engine:
+#   TO_HANDLE_LOSS, TO_BAD_PASS, TO_CHARGE, TO_INBOUND, TO_SHOT_CLOCK
+#
+# Policy:
+#   - Deadball turnovers: charge / inbound / shot clock
+#   - Liveball turnovers: handle loss / bad pass (we do NOT split bad-pass into steal vs lineout)
+#
+_DEADBALL_TURNOVER_OUTCOMES = {
+    "TO_CHARGE",
+    "TO_INBOUND",
+    "TO_SHOT_CLOCK",
+}
+
+_LIVEBALL_TURNOVER_OUTCOMES = {
+    "TO_HANDLE_LOSS",
+    "TO_BAD_PASS",
+}
+
+def _normalize_turnover_outcome(o: Any) -> str:
+    """Normalize turnover outcome keys (compat for older logs/validation)."""
+    try:
+        s = str(o or "")
+    except Exception:
+        return ""
+    # legacy key sometimes appears in validation / old logs
+    if s == "TO_SHOTCLOCK":
+        return "TO_SHOT_CLOCK"
+    return s
+
+def _turnover_is_deadball(outcome: Any) -> bool:
+    o = _normalize_turnover_outcome(outcome)
+    if o in _DEADBALL_TURNOVER_OUTCOMES:
+        return True
+    if o in _LIVEBALL_TURNOVER_OUTCOMES:
+        return False
+    # Unknown TO_*: default to LIVE to preserve fastbreak/flow (and avoid surprising deadball windows)
+    # but keep a warning to surface schema drift early.
+    if o.startswith("TO_"):
+        warnings.warn(f"[sim_possession] Unknown turnover outcome '{o}'; defaulting to liveball after_tov")
+        return False
+    # If payload is missing/invalid, be conservative and keep existing behavior.
+    return False
+
+
 def apply_quality_to_turnover_priors(
     pri: Dict[str, float],
     base_action: str,
@@ -424,13 +471,36 @@ def simulate_possession(
     if pos_start in dead_ball_starts:
         # dead-ball inbound attempt
         if simulate_inbound(rng, offense, defense, rules):
+            # IMPORTANT:
+            # Inbound turnovers are dead-ball turnovers. Next possession should start as dead-ball inbound.
+            # Also, inbound turnover consumes 0 action-time, so repeated inbound turnovers could freeze the
+            # game clock in the outer loop unless we apply a small dead-ball admin cost.
+            time_costs = rules.get("time_costs", {}) or {}
+            try:
+                inbound_tov_cost = float(time_costs.get("InboundTurnover", 1.0))
+            except Exception:
+                inbound_tov_cost = 1.0
+            if inbound_tov_cost > 0:
+                apply_dead_ball_cost(game_state, inbound_tov_cost, tempo_mult)
+                if game_state.clock_sec <= 0:
+                    game_state.clock_sec = 0
+                    return {
+                        "end_reason": "PERIOD_END",
+                        "pos_start_next": pos_start,
+                        "points_scored": int(offense.pts) - before_pts,
+                        "had_orb": had_orb,
+                        "pos_start": pos_origin,
+                        "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                    }
             return {
                 "end_reason": "TURNOVER",
-                "pos_start_next": "after_tov",
+                "pos_start_next": "after_tov_dead",
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                "turnover_outcome": "TO_INBOUND",
+                "turnover_deadball": True,
             }
 
     # shot_diet wiring
@@ -753,13 +823,17 @@ def simulate_possession(
             }
 
         if term == "TURNOVER":
+            tov_outcome = _normalize_turnover_outcome(payload.get("outcome") if isinstance(payload, dict) else "")
+            is_dead = _turnover_is_deadball(tov_outcome)
             return {
                 "end_reason": "TURNOVER",
-                "pos_start_next": "after_tov",
+                "pos_start_next": ("after_tov_dead" if is_dead else "after_tov"),
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                "turnover_outcome": tov_outcome,
+                "turnover_deadball": bool(is_dead),
             }
 
         if term == "FOUL_NO_SHOTS":
