@@ -13,6 +13,7 @@ NOTE: Split from sim.py on 2025-12-27.
 import random
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from .core import clamp
 from .models import GameState, TeamState
 from .team_keys import team_key
 
@@ -198,7 +199,7 @@ def _perform_rotation(
     home: TeamState,
     game_state: GameState,
     rules: Dict[str, Any],
-    is_garbage: bool,
+    garbage_index: float,
 ) -> None:
     """Auto-sub logic with priorities:
     1) converge to user-specified per-player minutes targets (soft constraint; best-effort)
@@ -212,6 +213,7 @@ def _perform_rotation(
       due to fatigue/target logic (only foul-out can force removal).
     """
     ctx = _get_tactics_context(team)
+    g = clamp(float(garbage_index), 0.0, 1.0)
 
     # role assignment (pid -> role_name)
     role_by_pid: Dict[str, str] = {}
@@ -305,7 +307,7 @@ def _perform_rotation(
     def rest_budget(pid: str) -> int:
         return minutes(pid) + remaining_est - target(pid)
 
-    # Score bench players: prioritize hitting targets first; use fatigue/garbage as tie-breakers
+    # Score bench players: prioritize hitting targets first; use fatigue/garbage_index as tie-breakers
     def in_score(pid_in: str) -> float:
         # deficit is primary: more minutes needed => higher score
         d = deficit(pid_in)
@@ -315,9 +317,9 @@ def _perform_rotation(
         over_pen = -min(0, d) / 120.0
         score = (max(d, 0) / 60.0) + (0.6 * f) + over_pen
 
-        if is_garbage:
-            # slight preference for lower-target players during garbage time
-            score -= (target(pid_in) / 60.0) * 0.05
+        if g > 0.0:
+            # Slight preference for lower-target players as garbage_index increases.
+            score -= (target(pid_in) / 60.0) * 0.05 * g
         return score
 
     # Score on-court players for removal: prefer those who can afford rest and are not needed for targets
@@ -342,9 +344,9 @@ def _perform_rotation(
         tired = (1.0 - f) * 1.5
 
         score = over + rest + tired
-        if is_garbage:
-            # prefer to rest high-target players in garbage time
-            score += (target(pid_out) / 60.0) * 0.05
+        if g > 0.0:
+            # Prefer resting high-target players as garbage_index increases.
+            score += (target(pid_out) / 60.0) * 0.05 * g
         return score
 
     # Build candidate lists
