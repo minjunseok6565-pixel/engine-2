@@ -130,6 +130,24 @@ class GameState:
     consecutive_team_tos: Dict[str, int] = field(default_factory=dict)
     last_scoring_side: Optional[str] = None
 
+    # --- Substitution system (rotation v1.0) ---
+    # Smoothed indices (EMA) + dominant mode/levels (hysteresis)
+    pressure_smoothed: float = 0.0
+    garbage_smoothed: float = 0.0
+    dominant_mode: str = "NEUTRAL"   # "NEUTRAL" | "CLUTCH" | "GARBAGE"
+    clutch_level: str = "OFF"        # "OFF" | "MID" | "STRONG"
+    garbage_level: str = "OFF"       # "OFF" | "MID" | "STRONG"
+
+    # Rotation state trackers (per-team)
+    # - rotation_last_sub_game_sec: last substitution game-time (elapsed seconds) per team key
+    # - rotation_last_in_game_sec: last time a player entered the court (elapsed seconds) per team key
+    # - rotation_checkpoint_mask: checkpoint processed flags (bitmask) per team key for the current quarter
+    # - rotation_checkpoint_quarter: last quarter number in which the team's checkpoint mask was initialized/reset
+    rotation_last_sub_game_sec: Dict[str, int] = field(default_factory=dict)
+    rotation_last_in_game_sec: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    rotation_checkpoint_mask: Dict[str, int] = field(default_factory=dict)
+    rotation_checkpoint_quarter: Dict[str, int] = field(default_factory=dict)
+
 @dataclass
 class Player:
     pid: str
