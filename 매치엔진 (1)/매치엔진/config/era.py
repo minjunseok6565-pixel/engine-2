@@ -165,7 +165,7 @@ MVP_RULES = {
         "pass_reset_suppress_urgency": 0.85
     },
 
-    # --- Context indices (continuous; replaces legacy is_clutch/is_garbage flags) ---
+    # --- Context indices (continuous; used to compute pressure_index / garbage_index) ---
     # Used by sim_game.py to compute pressure_index / garbage_index in [0..1].
     # Tune to get the *feel* you want without hard mode switches.
     "context_indices": {
