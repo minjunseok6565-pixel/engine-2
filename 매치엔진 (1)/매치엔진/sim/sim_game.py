@@ -16,7 +16,7 @@ from .validation import (
     ValidationReport,
     validate_and_sanitize_team,
 )
-from config.game_config import build_game_config
+from .game_config import build_game_config
 from .era import get_mvp_rules, load_era_config
 
 from .sim_clock import apply_dead_ball_cost
