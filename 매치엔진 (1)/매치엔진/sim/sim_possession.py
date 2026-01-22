@@ -38,7 +38,7 @@ from .sim_clock import (
 )
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 #
 # Turnover deadball/liveball classification
