@@ -47,7 +47,12 @@ if TYPE_CHECKING:
 #
 # Policy:
 #   - Deadball turnovers: charge / inbound / shot clock
-#   - Liveball turnovers: handle loss / bad pass (we do NOT split bad-pass into steal vs lineout)
+#   - Liveball turnovers: handle loss / bad pass
+#
+# NOTE:
+#   resolve_outcome() may attach payload flags that override this classification:
+#     - payload['deadball_override'] -> force deadball (e.g., bad-pass lineout)
+#     - payload['pos_start_next_override'] / payload['steal'] -> force after_steal start
 #
 _DEADBALL_TURNOVER_OUTCOMES = {
     "TO_CHARGE",
@@ -468,7 +473,7 @@ def simulate_possession(
         ctx["team_style"] = team_style
 
     # Dead-ball start can trigger inbound (score, quarter start, dead-ball TO, no-shot foul restart, etc.)
-    dead_ball_starts = {"start_q", "after_score", "after_tov_dead", "after_foul"}
+    dead_ball_starts = {"start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"}
     if pos_start in dead_ball_starts:
         # dead-ball inbound attempt
         if simulate_inbound(rng, offense, defense, rules):
@@ -522,7 +527,7 @@ def simulate_possession(
         if bool(ctx.get("dead_ball_inbound", False)):
             return probs
         pstart = str(ctx.get("pos_start", pos_start))
-        if pstart not in ("after_drb", "after_tov"):
+        if pstart not in ("after_drb", "after_tov", "after_steal", "after_block"):
             return probs
         mult_tbl = rules.get("transition_weight_mult", {}) or {}
         try:
@@ -826,15 +831,53 @@ def simulate_possession(
         if term == "TURNOVER":
             tov_outcome = _normalize_turnover_outcome(payload.get("outcome") if isinstance(payload, dict) else "")
             is_dead = _turnover_is_deadball(tov_outcome)
+            pos_start_next = ("after_tov_dead" if is_dead else "after_tov")
+            tov_deadball_reason = None
+            tov_is_steal = False
+            tov_stealer_pid = None
+
+            if isinstance(payload, dict):
+                # Allow resolve layer to override live/dead classification (e.g., bad-pass lineout).
+                if payload.get("deadball_override") is True:
+                    is_dead = True
+                elif payload.get("deadball_override") is False:
+                    is_dead = False
+                if payload.get("tov_deadball_reason") is not None:
+                    try:
+                        tov_deadball_reason = str(payload.get("tov_deadball_reason"))
+                    except Exception:
+                        tov_deadball_reason = None
+
+                tov_is_steal = bool(payload.get("steal", False))
+                tov_stealer_pid = payload.get("stealer_pid")
+
+                # Allow explicit next-start override (preferred) and fallback to 'steal' flag.
+                pstart_override = payload.get("pos_start_next_override")
+                if pstart_override:
+                    try:
+                        pos_start_next = str(pstart_override)
+                    except Exception:
+                        pos_start_next = pos_start_next
+                elif tov_is_steal and not is_dead:
+                    pos_start_next = "after_steal"
+
+            # Re-derive default after override, so deadball flags remain consistent.
+            if pos_start_next == "after_tov_dead":
+                is_dead = True
+            elif pos_start_next == "after_tov":
+                is_dead = False
             return {
                 "end_reason": "TURNOVER",
-                "pos_start_next": ("after_tov_dead" if is_dead else "after_tov"),
+                "pos_start_next": (pos_start_next if pos_start_next else ("after_tov_dead" if is_dead else "after_tov")),
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                 "turnover_outcome": tov_outcome,
                 "turnover_deadball": bool(is_dead),
+                "turnover_deadball_reason": tov_deadball_reason,
+                "turnover_is_steal": bool(tov_is_steal),
+                "turnover_stealer_pid": tov_stealer_pid,
             }
 
         if term == "FOUL_NO_SHOTS":
@@ -855,10 +898,10 @@ def simulate_possession(
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
 
-            # 14s reset rule (if < 14 then reset up)
-            foul_reset = float(rules.get("foul_reset", 14))
-            if game_state.shot_clock_sec < foul_reset:
-                game_state.shot_clock_sec = foul_reset
+                    # BLOCK_OOB: defense last touched -> out of bounds, offense retains.
+                    # NBA-style shot clock handling: keep the remaining (unexpired) shot clock.
+                    # (Do NOT increase to 14 here; 14s reset is reserved for specific rim-touch
+                    # sequences and offensive rebounds, handled elsewhere.)
 
             return {
                 "end_reason": "DEADBALL_STOP",
@@ -962,9 +1005,87 @@ def simulate_possession(
             }
 
         if term == "MISS":
+            blocked = bool(payload.get("blocked", False)) if isinstance(payload, dict) else False
+            block_kind = str(payload.get("block_kind", "")) if (blocked and isinstance(payload, dict)) else ""
+            blocker_pid = payload.get("blocker_pid") if (blocked and isinstance(payload, dict)) else None
+
+            # If the miss was blocked, sometimes the block goes out-of-bounds -> dead-ball inbound,
+            # offense retains (continuation). This is a key "game-feel" lever for rim protection.
+            if blocked:
+                pm = getattr(game_cfg, "prob_model", {}) or {}
+                bk = (block_kind or "").lower()
+                if ("rim" in bk) or (bk == "shot_rim"):
+                    k = "rim"
+                elif ("post" in bk) or (bk == "shot_post"):
+                    k = "post"
+                elif ("mid" in bk) or (bk == "shot_mid"):
+                    k = "mid"
+                else:
+                    k = "3"
+
+                try:
+                    p_oob = float(pm.get(f"block_oob_base_{k}", 0.22))
+                except Exception:
+                    p_oob = 0.22
+
+                if rng.random() < clamp(p_oob, 0.0, 0.95):
+                    stop_cost = float(time_costs.get("BlockOOBStop", 0.0))
+                    if stop_cost > 0:
+                        apply_dead_ball_cost(game_state, stop_cost, tempo_mult)
+                        if game_state.clock_sec <= 0:
+                            game_state.clock_sec = 0
+                            return {
+                                "end_reason": "PERIOD_END",
+                                "pos_start_next": "after_block_oob",
+                                "points_scored": int(offense.pts) - before_pts,
+                                "had_orb": had_orb,
+                                "pos_start": pos_origin,
+                                "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                                "was_blocked": True,
+                                "blocker_pid": blocker_pid,
+                                "block_kind": block_kind,
+                            }
+
+                    # 14s reset rule (if < orb_reset then reset up)
+                    orb_reset = float(rules.get("orb_reset", 14))
+                    if game_state.shot_clock_sec < orb_reset:
+                        game_state.shot_clock_sec = orb_reset
+
+                    return {
+                        "end_reason": "DEADBALL_STOP",
+                        "deadball_reason": "BLOCK_OOB",
+                        "pos_start_next": "after_block_oob",
+                        "points_scored": int(offense.pts) - before_pts,
+                        "had_orb": had_orb,
+                        "pos_start": pos_origin,
+                        "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                        "was_blocked": True,
+                        "blocker_pid": blocker_pid,
+                        "block_kind": block_kind,
+                    }
+
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0))
             drb_mult = float(defense.tactics.context.get("DRB_MULT", 1.0))
             p_orb = rebound_orb_probability(offense, defense, orb_mult, drb_mult, game_cfg=game_cfg)
+
+            # Blocked misses that stay in play are harder for the offense to recover.
+            if blocked:
+                pm = getattr(game_cfg, "prob_model", {}) or {}
+                bk = (block_kind or "").lower()
+                if ("rim" in bk) or (bk == "shot_rim"):
+                    k = "rim"
+                elif ("post" in bk) or (bk == "shot_post"):
+                    k = "post"
+                elif ("mid" in bk) or (bk == "shot_mid"):
+                    k = "mid"
+                else:
+                    k = "3"
+                try:
+                    mult = float(pm.get(f"blocked_orb_mult_{k}", 0.82))
+                except Exception:
+                    mult = 0.82
+                p_orb = clamp(float(p_orb) * clamp(mult, 0.10, 1.20), 0.02, 0.60)
+                
             if rng.random() < p_orb:
                 offense.orb += 1
                 rbd = choose_orb_rebounder(rng, offense)
@@ -988,11 +1109,14 @@ def simulate_possession(
             defense.add_player_stat(rbd.pid, "DRB", 1)
             return {
                 "end_reason": "DRB",
-                "pos_start_next": "after_drb",
+                "pos_start_next": ("after_block" if blocked else "after_drb"),
                 "points_scored": int(offense.pts) - before_pts,
                 "had_orb": had_orb,
                 "pos_start": pos_origin,
                 "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
+                "was_blocked": bool(blocked),
+                "blocker_pid": blocker_pid,
+                "block_kind": block_kind,
             }
 
         if term == "RESET":
