@@ -288,7 +288,19 @@ class TeamState:
 
     def add_player_stat(self, pid: str, key: str, inc: int = 1) -> None:
         if pid not in self.player_stats:
-            self.player_stats[pid] = {"PTS":0,"FGM":0,"FGA":0,"3PM":0,"3PA":0,"FTM":0,"FTA":0,"TOV":0,"ORB":0,"DRB":0,"AST":0}
+            # Keep a stable set of tracked boxscore keys for every player.
+            # (Other modules may read raw `player_stats` directly.)
+            self.player_stats[pid] = {
+                "PTS": 0,
+                "FGM": 0, "FGA": 0,
+                "3PM": 0, "3PA": 0,
+                "FTM": 0, "FTA": 0,
+                "ORB": 0, "DRB": 0,
+                "AST": 0,
+                "STL": 0,
+                "BLK": 0,
+                "TOV": 0,
+            }
         self.player_stats[pid][key] = self.player_stats[pid].get(key, 0) + inc
 
     def get_role_player(self, role: str, fallback_rank_key: Optional[str] = None) -> Player:
