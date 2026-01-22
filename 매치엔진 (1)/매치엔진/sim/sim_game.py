@@ -318,8 +318,8 @@ def simulate_game(
             AWAY: {p.pid: 1.0 for p in away.lineup},
         },
         minutes_played_sec={
-            HOME: {p.pid: 0 for p in home.lineup},
-            AWAY: {p.pid: 0 for p in away.lineup},
+            HOME: {p.pid: 0.0 for p in home.lineup},
+            AWAY: {p.pid: 0.0 for p in away.lineup},
         },
         on_court_home=list(start_home),
         on_court_away=list(start_away),
