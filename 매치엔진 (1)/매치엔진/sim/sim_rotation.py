@@ -275,15 +275,15 @@ def pick_desired_five_bruteforce(
     def fatigue(pid: str) -> float:
         return clamp(float(fat_map.get(pid, 1.0)), 0.0, 1.0)
 
-    def played(pid: str) -> int:
-        return int(mins_map.get(pid, 0))
+    def played(pid: str) -> float:
+        return float(mins_map.get(pid, 0.0))
 
-    def target(pid: str) -> int:
-        return int(targets.get(pid, 0))
+    def target(pid: str) -> float:
+        return float(targets.get(pid, 0))
 
     def urgency_norm(pid: str) -> float:
         # urgency = need/remaining, cap to 1.5 then normalize to 0..1
-        need = max(0, target(pid) - played(pid))
+        need = max(0.0, target(pid) - played(pid))
         urg = need / float(remaining_est)
         urg = clamp(urg, 0.0, 1.5)
         return clamp(urg / 1.5, 0.0, 1.0)
@@ -505,11 +505,13 @@ def _update_minutes(
     team: TeamState,
     home: TeamState,
 ) -> None:
-    inc = int(max(delta_sec, 0))
+    # Track seconds with sub-second precision to avoid systematic undercount
+    # when segment lengths are fractional (e.g., 3.2s, 2.6s, ...).
+    inc = float(max(delta_sec, 0.0))
     key = team_key(team, home)
     mins_map = game_state.minutes_played_sec.setdefault(key, {})
     for pid in pids:
-        mins_map[pid] = mins_map.get(pid, 0) + inc
+        mins_map[pid] = float(mins_map.get(pid, 0.0)) + inc
         
 
 # -------------------------
@@ -801,14 +803,14 @@ def _player_score_v1(
     def fatigue() -> float:
         return clamp(float(fat_map.get(pid, 1.0)), 0.0, 1.0)
 
-    def played() -> int:
-        return int(mins_map.get(pid, 0))
+    def played() -> float:
+        return float(mins_map.get(pid, 0.0))
 
-    def target() -> int:
-        return int(targets.get(pid, 0))
+    def target() -> float:
+        return float(targets.get(pid, 0))
 
     def urgency_norm() -> float:
-        need = max(0, target() - played())
+        need = max(0.0, target() - played())
         urg = need / float(remaining_est)
         urg = clamp(urg, 0.0, 1.5)
         return clamp(urg / 1.5, 0.0, 1.0)
