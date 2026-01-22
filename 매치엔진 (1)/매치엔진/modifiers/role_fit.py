@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 # This file keeps runtime-safe fallbacks so it won't crash if imported standalone.
 if TYPE_CHECKING:
     from typing import Protocol
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
     class Player(Protocol):
         def get(self, key: str) -> Any: ...
