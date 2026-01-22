@@ -196,6 +196,35 @@ def outcome_points(o: str) -> int:
     return 3 if o in ("SHOT_3_CS","SHOT_3_OD") else 2 if o.startswith("SHOT_") else 0
 
 
+def _should_award_fastbreak_fg(ctx: dict, first_fga_sc) -> bool:
+    """Fastbreak points should be credited on the *scoring FG event*, not at possession end.
+
+    Rules (v1):
+    - Only possessions that *originated* from a live-ball transition (after DRB / after TOV).
+    - Never credit during possession-continuation (dead-ball stop -> inbound -> set offense).
+    - Only credit within the early clock window, using the first FGA shot-clock snapshot.
+    - Free throws are intentionally excluded (handled elsewhere).
+    """
+    try:
+        origin = str(ctx.get("_pos_origin_start") or ctx.get("pos_start") or "")
+    except Exception:
+        origin = ""
+    if origin not in ("after_tov", "after_drb"):
+        return False
+    # Any dead-ball continuation segment implies defense is set -> not a fastbreak score.
+    if bool(ctx.get("_pos_continuation", False)):
+        return False
+    # Additional guardrail: explicit dead-ball inbound segments should never count as fastbreak.
+    if bool(ctx.get("dead_ball_inbound", False)):
+        return False
+    if first_fga_sc is None:
+        return False
+    try:
+        return float(first_fga_sc) >= 16.0
+    except Exception:
+        return False
+
+
 # -------------------------
 # Resolve sampled outcome into events
 # -------------------------
@@ -419,6 +448,12 @@ def resolve_outcome(
                 offense.add_player_stat(actor.pid, "3PM", 1)
             offense.pts += pts
             offense.add_player_stat(actor.pid, "PTS", pts)
+            # Fastbreak points: credit on the scoring FG event (exclude FT points).
+            try:
+                if _should_award_fastbreak_fg(ctx, ctx.get("first_fga_shotclock_sec")):
+                    offense.fastbreak_pts += int(pts)
+            except Exception as e:
+                _record_exception("fastbreak_pts_award_fg", e)
             if zone_detail:
                 offense.shot_zone_detail[zone_detail]["FGM"] += 1
 
@@ -1015,6 +1050,12 @@ def resolve_outcome(
                     offense.add_player_stat(actor.pid, "3PM", 1)
                 offense.pts += pts
                 offense.add_player_stat(actor.pid, "PTS", pts)
+                # Fastbreak points: credit only the made FG (exclude subsequent FT).
+                try:
+                    if _should_award_fastbreak_fg(ctx, ctx.get("first_fga_shotclock_sec")):
+                        offense.fastbreak_pts += int(pts)
+                except Exception as e:
+                    _record_exception("fastbreak_pts_award_fg", e)
                 and_one = True
                 if zone_detail:
                     offense.shot_zone_detail[zone_detail]["FGM"] += 1
