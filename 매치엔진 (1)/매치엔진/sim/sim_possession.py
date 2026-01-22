@@ -885,20 +885,6 @@ def simulate_possession(
             # Dead-ball stop, offense retains ball.
             # NOTE: We intentionally do NOT run the inbound here.
             # The game loop may want to do substitutions / timeouts / UI stops between the whistle and inbound.
-            stop_cost = float(time_costs.get("FoulStop", 0.0))
-            if stop_cost > 0:
-                apply_dead_ball_cost(game_state, stop_cost, tempo_mult)
-                if game_state.clock_sec <= 0:
-                    game_state.clock_sec = 0
-                    return {
-                        "end_reason": "PERIOD_END",
-                        "pos_start_next": "after_foul",
-                        "points_scored": int(offense.pts) - before_pts,
-                        "had_orb": had_orb,
-                        "pos_start": pos_origin,
-                        "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                    }
-
             return {
                 "end_reason": "DEADBALL_STOP",
                 "deadball_reason": "FOUL_NO_SHOTS",
@@ -1025,23 +1011,6 @@ def simulate_possession(
                     p_oob = 0.22
 
                 if rng.random() < clamp(p_oob, 0.0, 0.95):
-                    stop_cost = float(time_costs.get("BlockOOBStop", 0.0))
-                    if stop_cost > 0:
-                        apply_dead_ball_cost(game_state, stop_cost, tempo_mult)
-                        if game_state.clock_sec <= 0:
-                            game_state.clock_sec = 0
-                            return {
-                                "end_reason": "PERIOD_END",
-                                "pos_start_next": "after_block_oob",
-                                "points_scored": int(offense.pts) - before_pts,
-                                "had_orb": had_orb,
-                                "pos_start": pos_origin,
-                                "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
-                                "was_blocked": True,
-                                "blocker_pid": blocker_pid,
-                                "block_kind": block_kind,
-                            }
-
                     # BLOCK_OOB: defense last touched -> out of bounds, offense retains.
                     # NBA-style: keep the remaining (unexpired) shot clock.
 
