@@ -150,8 +150,8 @@ def _pid_role_mult(team: TeamState, pid: str, role_mult: Dict[str, float]) -> fl
 # ---- Shooter selection (catch & shoot) ----
 
 def choose_shooter_for_three(rng: random.Random, offense: TeamState, style: Optional[object] = None) -> Player:
-    # Use up to 3 best 3pt catch-and-shoot shooters, weighted (existing behavior).
-    cand = _top_k_by_stat(offense, "SHOT_3_CS", 3)
+    # Allow any on-court player to be the shooter; keep weighting by SHOT_3_CS.
+    cand = _active(offense)
     info = _shot_diet_info(style)
     apply_bias = style is not None
     weights: Dict[str, float] = {}
@@ -168,8 +168,8 @@ def choose_shooter_for_three(rng: random.Random, offense: TeamState, style: Opti
 
 
 def choose_shooter_for_mid(rng: random.Random, offense: TeamState, style: Optional[object] = None) -> Player:
-    # Use up to 3 best mid-range catch-and-shoot shooters, weighted (existing behavior).
-    cand = _top_k_by_stat(offense, "SHOT_MID_CS", 3)
+    # Allow any on-court player to be the shooter; keep weighting by SHOT_MID_CS.
+    cand = _active(offense)
     info = _shot_diet_info(style)
     apply_bias = style is not None
     weights: Dict[str, float] = {}
@@ -196,10 +196,13 @@ _CREATOR_ROLE_PRIORITY: Tuple[str, ...] = (
 )
 
 def choose_creator_for_pulloff(rng: random.Random, offense: TeamState, outcome: str, style: Optional[object] = None) -> Player:
-    # 12-role candidates first, then fill with top-K by the relevant off-dribble stat.
+    # 12-role candidates first, then fill so that ALL on-court players can be selected.
     key = "SHOT_3_OD" if outcome == "SHOT_3_OD" else "SHOT_MID_PU"
     cand = _players_from_roles(offense, _CREATOR_ROLE_PRIORITY)
-    cand = _fill_candidates_with_top_k(offense, cand, cap=3, stat_key=key)
+    # Previously capped to 3, which hard-limited distribution.
+    # Use the on-court count (normally 5) so every player becomes a candidate.
+    on_court_cap = len(_active(offense))
+    cand = _fill_candidates_with_top_k(offense, cand, cap=on_court_cap, stat_key=key)
 
     info = _shot_diet_info(style)
     extra: Dict[str, float] = {}
