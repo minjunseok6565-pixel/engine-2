@@ -668,8 +668,12 @@ def simulate_game(
 
             # Full shot clock starts after setup (unless this is a continuation segment
             # where the shot clock value must be preserved).
-            if not (pos_is_continuation and pos_start == "after_foul"):
-                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+            # Shot clock policy:
+            # - Fresh segment: set full shot clock once at segment entry (see earlier `if not pos_is_continuation:`).
+            # - Continuation segment (dead-ball stop where offense retains): preserve the value that
+            #   sim_possession applied (ORB reset, special cases, etc).
+            # Do NOT reset shot clock here based on pos_start; it causes future continuation types
+            # (e.g., after_block_oob) to be accidentally overwritten.
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
             pos_errors = ctx.get("errors") if isinstance(ctx, dict) else None
             if isinstance(pos_errors, list) and pos_errors:
