@@ -1046,10 +1046,8 @@ def simulate_possession(
                                 "block_kind": block_kind,
                             }
 
-                    # 14s reset rule (if < orb_reset then reset up)
-                    orb_reset = float(rules.get("orb_reset", 14))
-                    if game_state.shot_clock_sec < orb_reset:
-                        game_state.shot_clock_sec = orb_reset
+                    # BLOCK_OOB: defense last touched -> out of bounds, offense retains.
+                    # NBA-style: keep the remaining (unexpired) shot clock.
 
                     return {
                         "end_reason": "DEADBALL_STOP",
