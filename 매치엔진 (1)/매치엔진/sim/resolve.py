@@ -20,6 +20,8 @@ from .participants import (
     choose_weighted_player,
     choose_default_actor,
     choose_fouler_pid,
+    choose_stealer_pid,
+    choose_blocker_pid,
     choose_orb_rebounder as _choose_orb_rebounder,
     choose_drb_rebounder as _choose_drb_rebounder,
 )
@@ -366,7 +368,8 @@ def resolve_outcome(
             q_score = 0.0
         q_delta = float(quality.score_to_logit_delta(outcome, q_score))
         # Reduce existing def_score impact on SHOT to avoid double counting.
-        def_score = float(quality.mix_def_score_for_shot(float(def_score)))
+        def_score_raw = float(def_score)
+        def_score = float(quality.mix_def_score_for_shot(float(def_score_raw)))
         shot_dbg = {}
         if debug_q:
             shot_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
@@ -477,7 +480,7 @@ def resolve_outcome(
                 **shot_dbg,
             })
         else:
-            return "MISS", _with_team({
+            payload = {
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -485,7 +488,56 @@ def resolve_outcome(
                 "assisted": False,
                 "assister_pid": None,
                 **shot_dbg,
-            })
+            }
+
+            # BLOCK: on missed shots only, sample whether the miss was a block and credit a defender.
+            # This is intentionally a "miss subtype" so it doesn't distort make rates.
+            try:
+                if kind == "shot_rim":
+                    base_block = float(pm.get("block_base_rim", 0.085))
+                elif kind == "shot_post":
+                    base_block = float(pm.get("block_base_post", 0.065))
+                elif kind == "shot_mid":
+                    base_block = float(pm.get("block_base_mid", 0.022))
+                else:  # shot_3
+                    base_block = float(pm.get("block_base_3", 0.012))
+
+                def_feat = getattr(style, "def_features", {}) if style is not None else {}
+                d_rim = float(def_feat.get("D_RIM_PROTECT", 0.5))
+                d_poa = float(def_feat.get("D_POA", 0.5))
+                d_help = float(def_feat.get("D_HELP_CLOSEOUT", 0.5))
+
+                if kind in ("shot_rim", "shot_post"):
+                    block_logit_delta = (-float(q_score)) * 0.30 + (d_rim - 0.5) * 1.00 + (d_help - 0.5) * 0.35
+                else:
+                    block_logit_delta = (-float(q_score)) * 0.25 + (d_poa - 0.5) * 0.70 + (d_help - 0.5) * 0.25
+
+                block_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_block = prob_from_scores(
+                    rng,
+                    base_block,
+                    def_score_raw,
+                    off_score,
+                    kind="block",
+                    variance_mult=block_var,
+                    logit_delta=float(block_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_block:
+                    blocker_pid = choose_blocker_pid(rng, defense, kind)
+                    if blocker_pid:
+                        defense.add_player_stat(blocker_pid, "BLK", 1)
+                    payload.update({"blocked": True, "blocker_pid": blocker_pid, "block_kind": kind})
+
+                if debug_q:
+                    payload["p_block"] = float(p_block)
+                    payload["block_logit_delta"] = float(block_logit_delta)
+            except Exception as e:
+                _record_exception("block_model", e)
+
+            return "MISS", _with_team(payload)
+
 
     if is_pass(outcome):
         pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
@@ -571,7 +623,55 @@ def resolve_outcome(
                         "carry_in": float(carry_in),
                     }
                 )
+            # STEAL / LINEOUT split for TO_BAD_PASS:
+            # - If intercepted, credit STL and mark as a live-ball steal (strong transition start).
+            # - Otherwise, allow some bad passes to become dead-ball lineouts to reduce "all live-ball" feel.
+            p_steal = 0.0
+            p_lineout = 0.0
+            try:
+                steal_base = float(pm.get("steal_bad_pass_base", 0.60))
+                steal_mult = {
+                    "PASS_SKIP": 1.13,
+                    "PASS_EXTRA": 1.03,
+                    "PASS_KICKOUT": 0.97,
+                    "PASS_SHORTROLL": 0.92,
+                }.get(outcome, 1.00)
+                base_steal = steal_base * float(steal_mult)
+
+                def_feat = getattr(style, "def_features", {}) if style is not None else {}
+                d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
+                steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+
+                steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_steal = prob_from_scores(
+                    rng,
+                    base_steal,
+                    def_score,
+                    off_score,
+                    kind="steal",
+                    variance_mult=steal_var,
+                    logit_delta=float(steal_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_steal:
+                    stealer_pid = choose_stealer_pid(rng, defense)
+                    if stealer_pid:
+                        defense.add_player_stat(stealer_pid, "STL", 1)
+                    payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
+                else:
+                    lineout_base = float(pm.get("bad_pass_lineout_base", 0.30))
+                    p_lineout = clamp(lineout_base + max(0.0, -float(q_score)) * 0.06, 0.05, 0.55)
+                    if rng.random() < p_lineout:
+                        payload.update({"deadball_override": True, "tov_deadball_reason": "LINEOUT_BAD_PASS"})
+
+                if debug_q:
+                    payload.setdefault("probs", {}).update({"p_steal": float(p_steal), "p_lineout": float(p_lineout)})
+            except Exception as e:
+                _record_exception("steal_split_bad_pass", e)
+
             return "TURNOVER", _with_team(payload)
+
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
         p_reset = float(sigmoid(s_reset * (t_reset - q_score)))
@@ -658,7 +758,106 @@ def resolve_outcome(
     if is_to(outcome):
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
+        
+        payload: Dict[str, Any] = {"outcome": outcome, "pid": actor.pid}
+
+        # For select live-ball turnovers, split into (steal vs non-steal) so defensive playmakers
+        # are credited and downstream possession context can reflect stronger transition starts.
+        if outcome in ("TO_BAD_PASS", "TO_HANDLE_LOSS"):
+            scheme = getattr(defense.tactics, "defense_scheme", "")
+            debug_q = bool(ctx.get("debug_quality", False))
+            role_players = get_or_build_def_role_players(
+                ctx,
+                defense,
+                scheme=scheme,
+                debug_detail_key=("def_role_players_detail" if debug_q else None),
+            )
+
+            q_detail = None
+            q_score = 0.0
+            try:
+                if debug_q:
+                    q_detail = quality.compute_quality_score(
+                        scheme=scheme,
+                        base_action=base_action,
+                        outcome=outcome,
+                        role_players=role_players,
+                        get_stat=engine_get_stat,
+                        return_detail=True,
+                    )
+                    q_score = float(q_detail.score)
+                else:
+                    q_score = float(
+                        quality.compute_quality_score(
+                            scheme=scheme,
+                            base_action=base_action,
+                            outcome=outcome,
+                            role_players=role_players,
+                            get_stat=engine_get_stat,
+                        )
+                    )
+            except Exception as e:
+                _record_exception("quality_compute_to", e)
+                q_score = 0.0
+
+            def_feat = getattr(style, "def_features", {}) if style is not None else {}
+            d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
+
+            p_steal = 0.0
+            p_lineout = 0.0
+            steal_logit_delta = 0.0
+            try:
+                if outcome == "TO_BAD_PASS":
+                    base_steal = float(pm.get("steal_bad_pass_base", 0.60))
+                    steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+                    lineout_base = float(pm.get("bad_pass_lineout_base", 0.30))
+                    p_lineout = clamp(lineout_base + max(0.0, -float(q_score)) * 0.06, 0.05, 0.55)
+                else:  # TO_HANDLE_LOSS
+                    base_steal = float(pm.get("steal_handle_loss_base", 0.72))
+                    steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00
+                    p_lineout = clamp(0.10 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
+
+                steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_steal = prob_from_scores(
+                    rng,
+                    base_steal,
+                    def_score,
+                    off_score,
+                    kind="steal",
+                    variance_mult=steal_var,
+                    logit_delta=float(steal_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_steal:
+                    stealer_pid = choose_stealer_pid(rng, defense)
+                    if stealer_pid:
+                        defense.add_player_stat(stealer_pid, "STL", 1)
+                    payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
+                else:
+                    if rng.random() < p_lineout:
+                        payload.update(
+                            {
+                                "deadball_override": True,
+                                "tov_deadball_reason": ("LINEOUT_BAD_PASS" if outcome == "TO_BAD_PASS" else "LINEOUT_LOOSE"),
+                            }
+                        )
+
+                if debug_q:
+                    payload.update(
+                        {
+                            "q_score": float(q_score),
+                            "q_detail": q_detail,
+                            "p_steal": float(p_steal),
+                            "p_lineout": float(p_lineout),
+                            "steal_logit_delta": float(steal_logit_delta),
+                        }
+                    )
+            except Exception as e:
+                _record_exception("steal_split_to", e)
+
+        return "TURNOVER", _with_team(payload)
+
     if is_foul(outcome):
         fouler_pid = None
         team_fouls = ctx.get("team_fouls") or {}
