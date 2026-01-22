@@ -7,7 +7,7 @@ from .core import clamp
 from .team_keys import HOME, AWAY
 
 
-_DEADBALL_STARTS = {"start_q", "after_score", "after_tov_dead", "after_foul"}
+_DEADBALL_STARTS = {"start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"}
 
 
 def ensure_timeout_state(game_state: Any, rules: Dict[str, Any]) -> None:
