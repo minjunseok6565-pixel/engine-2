@@ -156,7 +156,19 @@ def _choose_ot_start_offense(
 
 def init_player_boxes(team: TeamState) -> None:
     for p in team.lineup:
-        team.player_stats[p.pid] = {"PTS":0,"FGM":0,"FGA":0,"3PM":0,"3PA":0,"FTM":0,"FTA":0,"TOV":0,"ORB":0,"DRB":0}
+        # Initialize all tracked boxscore keys to keep downstream reporting stable.
+        # (Some keys may be absent if legacy callers bypass init_player_boxes.)
+        team.player_stats[p.pid] = {
+            "PTS": 0,
+            "FGM": 0, "FGA": 0,
+            "3PM": 0, "3PA": 0,
+            "FTM": 0, "FTA": 0,
+            "ORB": 0, "DRB": 0,
+            "AST": 0,
+            "STL": 0,
+            "BLK": 0,
+            "TOV": 0,
+        }
 
 def _safe_pct(made: int, att: int) -> float:
     return round((float(made) / float(att)) * 100.0, 2) if att else 0.0
@@ -168,8 +180,7 @@ def build_player_box(
 ) -> Dict[str, Dict[str, Any]]:
     """Return per-player box score with derived percentages + minutes + fouls.
 
-    Note: this engine currently does NOT track AST/STL/BLK; only fields that exist in
-    TeamState.player_stats and GameState are included.
+    Only fields tracked in TeamState.player_stats and GameState are included.
     """
     key = team_key(team, home) if game_state is not None and home is not None else None
     fouls = dict(getattr(game_state, "player_fouls", {}).get(key, {}) or {}) if key else {}
@@ -183,6 +194,8 @@ def build_player_box(
         tpm, tpa = int(s.get("3PM", 0)), int(s.get("3PA", 0))
         ftm, fta = int(s.get("FTM", 0)), int(s.get("FTA", 0))
         orb, drb = int(s.get("ORB", 0)), int(s.get("DRB", 0))
+        stl = int(s.get("STL", 0))
+        blk = int(s.get("BLK", 0))
         out[pid] = {
             "Name": p.name,
             "MIN": round(float(mins.get(pid, 0)) / 60.0, 2),
@@ -193,6 +206,8 @@ def build_player_box(
             "ORB": orb, "DRB": drb, "REB": orb + drb,
             "TOV": int(s.get("TOV", 0)),
             "AST": int(s.get("AST", 0)),
+            "STL": stl,
+            "BLK": blk,
             "PF": int(fouls.get(pid, 0)),
         }
     return out
@@ -204,6 +219,9 @@ def summarize_team(
 ) -> Dict[str, Any]:
     key = team_key(team, home) if game_state is not None and home is not None else None
     fat_map = game_state.fatigue.get(key, {}) if key else {}
+    # Team-level STL/BLK are derived from per-player credits.
+    stl_total = sum(int((team.player_stats.get(pid, {}) or {}).get("STL", 0)) for pid in team.player_stats.keys())
+    blk_total = sum(int((team.player_stats.get(pid, {}) or {}).get("BLK", 0)) for pid in team.player_stats.keys())
     return {
         "PTS": team.pts,
         "FGM": team.fgm, "FGA": team.fga,
@@ -213,6 +231,8 @@ def summarize_team(
         "ORB": team.orb, "DRB": team.drb,
         "Possessions": team.possessions,
         "AST": team.ast,
+        "STL": stl_total,
+        "BLK": blk_total,
         "PITP": team.pitp,
         "FastbreakPTS": team.fastbreak_pts,
         "SecondChancePTS": team.second_chance_pts,
@@ -322,7 +342,7 @@ def simulate_game(
     # Dead-ball windows where substitutions are allowed.
     # NOTE: start_q is treated as a dead-ball window ONLY for Q2+ (and OT),
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
-    DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul")
+    DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob")
 
     # Team side keys used by timeout/rotation trackers and debug helpers.
     home_team_id = HOME
@@ -408,7 +428,7 @@ def simulate_game(
 
             # For continuation segments (e.g. after a no-shot foul), preserve the current
             # shot clock value (the foul-stop logic may have applied a 14s reset already).
-            if not (pos_is_continuation and pos_start == "after_foul"):
+            if not pos_is_continuation:
                 game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
                 
             start_clock = game_state.clock_sec
@@ -593,7 +613,7 @@ def simulate_game(
                 "foul_out": int(rules.get("foul_out", 6)),
                 "bonus_threshold": bonus_threshold,
                 "pos_start": pos_start,
-                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul"),
+                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"),
 
                 # Possession-continuation support (used by sim_possession).
                 "_pos_continuation": pos_is_continuation,
@@ -603,10 +623,10 @@ def simulate_game(
                 "first_fga_shotclock_sec": pos_first_fga_sc,
             }
 
-            # Setup time: dead-ball only (game clock runs; shot clock should start at full).
-            # For continuation after a no-shot foul, the foul-stop already accounted for the
-            # stoppage time, so we skip additional setup here.
-            if pos_is_continuation and pos_start == "after_foul":
+            # Setup time: dead-ball stoppages / inbound segments (game clock runs).
+            # For continuation segments (dead-ball stop restarts), the stop logic already accounted
+            # for the stoppage time and any shot-clock reset, so we skip additional setup here.
+            if pos_is_continuation:
                 setup_cost = 0.0
             else:
                 setup_map = {
@@ -614,8 +634,13 @@ def simulate_game(
                     "after_score": "setup_after_score",
                     "after_drb": "setup_after_drb",
                     "after_tov": "setup_after_tov",
+                    "after_steal": "setup_after_steal",
+                    "after_block": "setup_after_block",
                     "after_tov_dead": "setup_after_tov",
                     "after_foul": "setup_after_foul",
+                    # Safety: if a caller ever uses after_block_oob as a non-continuation start,
+                    # treat it like a dead-ball inbound start (similar to after_foul).
+                    "after_block_oob": "setup_after_foul",
                 }
                 setup_key = setup_map.get(pos_start, "possession_setup")
                 setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
@@ -708,9 +733,9 @@ def simulate_game(
 
             if pts_scored > 0 and had_orb:
                 offense.second_chance_pts += pts_scored
-            if pts_scored > 0 and pos_start_val in ("after_tov", "after_tov_dead"):
+            if pts_scored > 0 and pos_start_val in ("after_tov", "after_tov_dead", "after_steal"):
                 offense.points_off_tov += pts_scored
-            if pts_scored > 0 and pos_start_val in ("after_tov", "after_drb") and first_fga_sc is not None:
+            if pts_scored > 0 and pos_start_val in ("after_tov", "after_drb", "after_steal", "after_block") and first_fga_sc is not None:
                 try:
                     if float(first_fga_sc) >= 16.0:
                         offense.fastbreak_pts += pts_scored
