@@ -12,7 +12,7 @@ from .models import DERIVED_DEFAULT, Player, TeamState, ROLE_FALLBACK_RANK
 from .tactics import TacticsConfig
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 SHOT_DIET_SUPPORTED_OFFENSE_SCHEMES = {
     "Spread_HeavyPnR",
