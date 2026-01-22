@@ -42,6 +42,30 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "ft_range": 0.47,
     "ft_min": 0.40,
     "ft_max": 0.95,
+
+    # Steal / block event modeling (used by resolve.py; 0-1)
+    # NOTE: These are event probabilities, not boxscore rates. They are intended to be
+    # combined with score/quality modulation (prob_from_scores) and contextual deltas.
+    "steal_bad_pass_base": 0.60,
+    "steal_handle_loss_base": 0.72,
+    "bad_pass_lineout_base": 0.30,
+
+    "block_base_rim": 0.085,
+    "block_base_post": 0.065,
+    "block_base_mid": 0.022,
+    "block_base_3": 0.012,
+
+    # Block outcomes: out-of-bounds -> offense retains (dead-ball) vs live rebound.
+    "block_oob_base_rim": 0.32,
+    "block_oob_base_post": 0.30,
+    "block_oob_base_mid": 0.18,
+    "block_oob_base_3": 0.12,
+
+    # If a blocked miss stays in-play, it is harder for the offense to recover the ball.
+    "blocked_orb_mult_rim": 0.78,
+    "blocked_orb_mult_post": 0.80,
+    "blocked_orb_mult_mid": 0.86,
+    "blocked_orb_mult_3": 0.88,
 }
 
 
@@ -57,6 +81,8 @@ DEFAULT_LOGISTIC_PARAMS: Dict[str, Dict[str, float]] = {
     "shot_post":{"scale": 20.0, "sensitivity": 1.0 / 20.0},   # post shots
     "pass":     {"scale": 28.0, "sensitivity": 1.0 / 28.0},   # pass success
     "rebound":  {"scale": 22.0, "sensitivity": 1.0 / 22.0},   # ORB% model (legacy)
+    "steal":    {"scale": 26.0, "sensitivity": 1.0 / 26.0},   # turnover->steal split
+    "block":    {"scale": 28.0, "sensitivity": 1.0 / 28.0},   # miss->block split
     "turnover": {"scale": 24.0, "sensitivity": 1.0 / 24.0},   # reserved (TO is prior-only)
 }
 
@@ -70,6 +96,8 @@ DEFAULT_VARIANCE_PARAMS: Dict[str, Any] = {
         "shot_post": 1.00,
         "pass": 0.85,
         "rebound": 0.60,
+        "steal": 0.75,
+        "block": 0.80,
     },
     # optional per-team multiplier range (clamped)
     "team_mult_lo": 0.60,
@@ -139,7 +167,10 @@ MVP_RULES = {
         "setup_after_score": 3.5,
         "setup_after_drb": 3.1,
         "setup_after_tov": 2.1,
+        "setup_after_steal": 1.5,
+        "setup_after_block": 1.9,
         "FoulStop": 2.6,
+        "BlockOOBStop": 2.0,
         "PnR": 8.3,
         "DHO": 7.1,
         "Drive": 6.2,
@@ -186,6 +217,8 @@ MVP_RULES = {
         "default": 1.0,
         "after_drb": 4.5,
         "after_tov": 6.0,
+        "after_steal": 7.5,
+        "after_block": 6.3,
     },
  
      # --- Timeouts (dead-ball only, v1) ---
