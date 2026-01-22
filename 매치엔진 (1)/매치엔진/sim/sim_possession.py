@@ -25,6 +25,7 @@ from .resolve import (
     choose_orb_rebounder,
     rebound_orb_probability,
     resolve_outcome,
+    commit_pending_pass_event,
 )
 from .sim_rotation import maybe_substitute_deadball_v1
 from .role_fit import apply_role_fit_to_priors_and_tags
@@ -1165,30 +1166,39 @@ def simulate_possession(
 
         if term == "CONTINUE":
             pass_chain = payload.get("pass_chain", pass_chain + 1)
-            pass_cost = 0.0
+            pass_cost_nominal = 0.0
             if outcome in ("PASS_KICKOUT", "PASS_SKIP"):
-                pass_cost = float(time_costs.get("Kickout", 0.0))
+                pass_cost_nominal = float(time_costs.get("Kickout", 0.0))
             elif outcome == "PASS_EXTRA":
-                pass_cost = float(time_costs.get("ExtraPass", 0.0))
+                pass_cost_nominal = float(time_costs.get("ExtraPass", 0.0))
+            elif outcome == "PASS_SHORTROLL":
+                # Reuse ExtraPass cost for shortroll outlets if no dedicated key exists.
+                pass_cost_nominal = float(time_costs.get("ExtraPass", 0.0))
 
             tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
             budget_now = _budget_sec()
 
-            # If too little time remains to safely complete a pass, force a quick attempt instead.
-            if pass_cost > 0 and (pass_cost * tm) >= max(0.0, budget_now - min_release_window):
-                action = "QuickShot"
-                _refresh_action_tags(action, tags)
-                stall_steps = _bump_stall(stall_steps, sc0, gc0)
-                continue
+            # Apply as much pass time-cost as feasible, then force QuickShot if the full pass
+            # would leave insufficient release window. This preserves late-clock realism while
+            # still committing the pass event for assist tracking.
+            pass_cost_apply = 0.0
+            force_quick_after_pass = False
+            if pass_cost_nominal > 0.0:
+                max_cost = max(0.0, (budget_now - min_release_window) / tm) if tm > 0 else 0.0
+                pass_cost_apply = min(pass_cost_nominal, max_cost)
+                if pass_cost_nominal > (max_cost + 1e-9):
+                    force_quick_after_pass = True
 
-            if pass_cost > 0:
-                apply_time_cost(game_state, pass_cost, tempo_mult)
+            if pass_cost_apply > 0.0:
+                apply_time_cost(game_state, pass_cost_apply, tempo_mult)
                 if game_state.clock_sec < 0:
                     game_state.clock_sec = 0
                 if game_state.shot_clock_sec < 0:
                     game_state.shot_clock_sec = 0
                     
                 if game_state.shot_clock_sec <= 0:
+                    # Drop any staged pass event to avoid leaking into the next possession.
+                    ctx.pop("_pending_pass_event", None)
                     commit_shot_clock_turnover(offense)
                     return {
                         "end_reason": "SHOTCLOCK",
@@ -1199,6 +1209,7 @@ def simulate_possession(
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
                 if game_state.clock_sec <= 0:
+                    ctx.pop("_pending_pass_event", None)
                     game_state.clock_sec = 0
                     return {
                         "end_reason": "PERIOD_END",
@@ -1209,7 +1220,13 @@ def simulate_possession(
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
 
-            if outcome in ("PASS_KICKOUT", "PASS_SKIP", "PASS_EXTRA"):
+            # Commit staged pass event AFTER time cost has been applied so the recorded
+            # shot-clock timestamp is accurate for assist-window logic.
+            commit_pending_pass_event(ctx, game_state)
+
+            if force_quick_after_pass:
+                action = "QuickShot"
+            elif outcome in ("PASS_KICKOUT", "PASS_SKIP", "PASS_EXTRA"):
                 # Avoid chaining extra passes late: choose a budget-feasible catch-and-shoot.
                 action = choose_action_with_budget(rng, {"SpotUp": 0.72, "ExtraPass": 0.28})
             elif outcome == "PASS_SHORTROLL":
@@ -1217,7 +1234,7 @@ def simulate_possession(
             else:
                 action = choose_action_with_budget(rng, off_probs)
 
-            if pass_chain >= 3:
+            if (not force_quick_after_pass) and pass_chain >= 3:
                 # After a long pass chain, bias toward a shot attempt.
                 action = choose_action_with_budget(rng, {"SpotUp": 1.0})
 
