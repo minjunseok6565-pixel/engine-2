@@ -1,0 +1,365 @@
+{
+  "version": "1.0",
+  "presets": {
+    "atlanta hawks": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.53,
+      "clutch_lock_mult": 1.05,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.06,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "boston celtics": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.58,
+      "clutch_lock_mult": 1.15,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "FiveOut",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.2,
+        "scheme_outcome_strength": 1.07
+      }
+    },
+    "brooklyn nets": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.48,
+      "clutch_lock_mult": 0.98,
+      "garbage_lock_mult": 1.3,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Blitz_TrapPnR",
+        "scheme_weight_sharpness": 0.95,
+        "scheme_outcome_strength": 0.99
+      }
+    },
+    "charlotte hornets": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.47,
+      "clutch_lock_mult": 0.95,
+      "garbage_lock_mult": 1.35,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 0.98,
+        "scheme_outcome_strength": 0.98
+      }
+    },
+    "chicago bulls": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.05,
+      "garbage_lock_mult": 1.2,
+      "tactics": {
+        "offense_scheme": "Transition_Early",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "cleveland cavaliers": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.57,
+      "clutch_lock_mult": 1.12,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Spread_HeavyPnR",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.12,
+        "scheme_outcome_strength": 1.05
+      }
+    },
+    "dallas mavericks": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.54,
+      "clutch_lock_mult": 1.15,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Spread_HeavyPnR",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.12,
+        "scheme_outcome_strength": 1.05
+      }
+    },
+    "denver nuggets": {
+      "depth_n": 8,
+      "planned_change_threshold": 0.6,
+      "clutch_lock_mult": 1.18,
+      "garbage_lock_mult": 0.9,
+      "tactics": {
+        "offense_scheme": "Horns_Elbow",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.14,
+        "scheme_outcome_strength": 1.06
+      }
+    },
+    "detroit pistons": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.05,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "Post_InsideOut",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.05,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "goldenstate warriors": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.08,
+      "garbage_lock_mult": 1.05,
+      "tactics": {
+        "offense_scheme": "Motion_SplitCut",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.13,
+        "scheme_outcome_strength": 1.05
+      }
+    },
+    "houston rockets": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.08,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "Post_InsideOut",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.12,
+        "scheme_outcome_strength": 1.04
+      }
+    },
+    "indiana pacers": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.52,
+      "clutch_lock_mult": 1.05,
+      "garbage_lock_mult": 1.1,
+      "tactics": {
+        "offense_scheme": "Spread_HeavyPnR",
+        "defense_scheme": "Hedge_ShowRecover",
+        "scheme_weight_sharpness": 1.12,
+        "scheme_outcome_strength": 1.05
+      }
+    },
+    "losangeles clippers": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.12,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Post_InsideOut",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.1,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "losangeles lakers": {
+      "depth_n": 8,
+      "planned_change_threshold": 0.6,
+      "clutch_lock_mult": 1.18,
+      "garbage_lock_mult": 0.9,
+      "tactics": {
+        "offense_scheme": "Post_InsideOut",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "memphis grizzlies": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.08,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "Transition_Early",
+        "defense_scheme": "Blitz_TrapPnR",
+        "scheme_weight_sharpness": 1.12,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "miami heat": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.5,
+      "clutch_lock_mult": 1.08,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Zone",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "milwaukee bucks": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.56,
+      "clutch_lock_mult": 1.12,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.04
+      }
+    },
+    "minnesota timberwolves": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.56,
+      "clutch_lock_mult": 1.12,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Spread_HeavyPnR",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.07,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "neworleans pelicans": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.47,
+      "clutch_lock_mult": 0.98,
+      "garbage_lock_mult": 1.3,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.02,
+        "scheme_outcome_strength": 0.99
+      }
+    },
+    "newyork knicks": {
+      "depth_n": 8,
+      "planned_change_threshold": 0.62,
+      "clutch_lock_mult": 1.2,
+      "garbage_lock_mult": 0.8,
+      "tactics": {
+        "offense_scheme": "Post_InsideOut",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.1,
+        "scheme_outcome_strength": 1.04
+      }
+    },
+    "oklahomacity thunder": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.53,
+      "clutch_lock_mult": 1.1,
+      "garbage_lock_mult": 1.1,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Switch_Everything",
+        "scheme_weight_sharpness": 1.15,
+        "scheme_outcome_strength": 1.06
+      }
+    },
+    "orlando magic": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.05,
+      "garbage_lock_mult": 1.15,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "ICE_SidePnR",
+        "scheme_weight_sharpness": 1.06,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "philadelphia 76ers": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.48,
+      "clutch_lock_mult": 1.12,
+      "garbage_lock_mult": 1.25,
+      "tactics": {
+        "offense_scheme": "Spread_HeavyPnR",
+        "defense_scheme": "Blitz_TrapPnR",
+        "scheme_weight_sharpness": 1.07,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "phoenix suns": {
+      "depth_n": 9,
+      "planned_change_threshold": 0.58,
+      "clutch_lock_mult": 1.15,
+      "garbage_lock_mult": 0.95,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.03
+      }
+    },
+    "portland trail blazers": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.52,
+      "clutch_lock_mult": 1.02,
+      "garbage_lock_mult": 1.25,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 0.98,
+        "scheme_outcome_strength": 0.99
+      }
+    },
+    "sacramento kings": {
+      "depth_n": 10,
+      "planned_change_threshold": 0.55,
+      "clutch_lock_mult": 1.08,
+      "garbage_lock_mult": 1.1,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Hedge_ShowRecover",
+        "scheme_weight_sharpness": 1.06,
+        "scheme_outcome_strength": 1.02
+      }
+    },
+    "sanantonio spurs": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.5,
+      "clutch_lock_mult": 0.98,
+      "garbage_lock_mult": 1.35,
+      "tactics": {
+        "offense_scheme": "Transition_Early",
+        "defense_scheme": "ICE_SidePnR",
+        "scheme_weight_sharpness": 1.08,
+        "scheme_outcome_strength": 1.0
+      }
+    },
+    "toronto raptors": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.48,
+      "clutch_lock_mult": 0.98,
+      "garbage_lock_mult": 1.35,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Hedge_ShowRecover",
+        "scheme_weight_sharpness": 1.02,
+        "scheme_outcome_strength": 0.99
+      }
+    },
+    "utah jazz": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.46,
+      "clutch_lock_mult": 0.93,
+      "garbage_lock_mult": 1.4,
+      "tactics": {
+        "offense_scheme": "Drive_Kick",
+        "defense_scheme": "Zone",
+        "scheme_weight_sharpness": 0.95,
+        "scheme_outcome_strength": 0.98
+      }
+    },
+    "washington wizards": {
+      "depth_n": 11,
+      "planned_change_threshold": 0.46,
+      "clutch_lock_mult": 0.93,
+      "garbage_lock_mult": 1.4,
+      "tactics": {
+        "offense_scheme": "DHO_Chicago",
+        "defense_scheme": "Drop",
+        "scheme_weight_sharpness": 0.97,
+        "scheme_outcome_strength": 0.98
+      }
+    }
+  }
+}
