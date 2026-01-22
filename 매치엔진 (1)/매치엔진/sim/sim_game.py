@@ -721,7 +721,6 @@ def simulate_game(
             pts_scored = int(pos_res.get("points_scored", 0))
             had_orb = bool(pos_res.get("had_orb", False))
             pos_start_val = str(pos_res.get("pos_start", ""))
-            first_fga_sc = pos_res.get("first_fga_shotclock_sec")
             end_key = "OTHER"
             if bool(pos_res.get("ended_with_ft_trip")):
                 end_key = "FT_TRIP"
@@ -735,15 +734,6 @@ def simulate_game(
                 offense.second_chance_pts += pts_scored
             if pts_scored > 0 and pos_start_val in ("after_tov", "after_tov_dead", "after_steal"):
                 offense.points_off_tov += pts_scored
-            if pts_scored > 0 and pos_start_val in ("after_tov", "after_drb", "after_steal", "after_block") and first_fga_sc is not None:
-                try:
-                    if float(first_fga_sc) >= 16.0:
-                        offense.fastbreak_pts += pts_scored
-                except Exception as exc:
-                    report.warn(
-                        f"fastbreak_pts: invalid first_fga_shotclock_sec '{first_fga_sc}' "
-                        f"({type(exc).__name__}: {exc})"
-                    )
 
             # --- NOTE (8-A): substitutions are NOT allowed here anymore ---
             # Previously, we rotated after every possession end, which could cause unrealistic
