@@ -34,7 +34,7 @@ from .profiles import OUTCOME_PROFILES, CORNER3_PROB_BY_ACTION_BASE
 from .models import GameState, Player, TeamState
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 def _pick_default_actor(offense: TeamState) -> Player:
     """12-role first, then best passer. Used when an outcome has no specific participant chooser."""
