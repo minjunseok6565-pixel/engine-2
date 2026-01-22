@@ -898,11 +898,6 @@ def simulate_possession(
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
 
-                    # BLOCK_OOB: defense last touched -> out of bounds, offense retains.
-                    # NBA-style shot clock handling: keep the remaining (unexpired) shot clock.
-                    # (Do NOT increase to 14 here; 14s reset is reserved for specific rim-touch
-                    # sequences and offensive rebounds, handled elsewhere.)
-
             return {
                 "end_reason": "DEADBALL_STOP",
                 "deadball_reason": "FOUL_NO_SHOTS",
