@@ -623,7 +623,9 @@ def simulate_game(
                 "first_fga_shotclock_sec": pos_first_fga_sc,
             }
 
-            # Setup time: dead-ball stoppages / inbound segments (game clock runs).
+            # Setup time: admin / bring-up segments.
+            # - Game clock always runs.
+            # - Shot clock runs only for "live" starts (DRB/steal/live-TOV recovery/etc).
             # For continuation segments (dead-ball stop restarts), the stop logic already accounted
             # for the stoppage time and any shot-clock reset, so we skip additional setup here.
             if pos_is_continuation:
@@ -644,20 +646,30 @@ def simulate_game(
                 }
                 setup_key = setup_map.get(pos_start, "possession_setup")
                 setup_cost = float(rules.get("time_costs", {}).get(setup_key, rules.get("time_costs", {}).get("possession_setup", 0.0)))
+
+            # Live starts: treat setup time as live-clock time (shot clock elapses too).
+            # Dead-ball starts: shot clock does not elapse during setup.
+            live_setup_starts = {"after_drb", "after_tov", "after_steal", "after_block"}
+            setup_runs_shot_clock = str(pos_start) in live_setup_starts 
             # Late-clock guardrail: never allow dead-ball setup to delete the possession entirely.
             timing = rules.get("timing", {}) or {}
             try:
                 min_release_window = float(timing.get("min_release_window", 0.7))
             except Exception:
                 min_release_window = 0.7
-            # apply_dead_ball_cost consumes (setup_cost * tempo_mult) seconds from the game clock.
+            # apply_dead_ball_cost consumes (setup_cost * tempo_mult) seconds from the game clock,
+            # and optionally from the shot clock (for live starts).
             # Ensure we leave at least `min_release_window` seconds for a live attempt.
             if setup_cost > 0:
                 tm = float(tempo_mult) if float(tempo_mult) > 0 else 1.0
-                max_setup = max(0.0, (float(game_state.clock_sec) - min_release_window) / tm)
+                max_setup_gc = max(0.0, (float(game_state.clock_sec) - min_release_window) / tm)
+                max_setup = max_setup_gc
+                if setup_runs_shot_clock:
+                    max_setup_sc = max(0.0, (float(game_state.shot_clock_sec) - min_release_window) / tm)
+                    max_setup = min(max_setup, max_setup_sc)
                 setup_cost = min(setup_cost, max_setup)
             if setup_cost > 0:
-                apply_dead_ball_cost(game_state, setup_cost, tempo_mult)
+                apply_dead_ball_cost(game_state, setup_cost, tempo_mult, run_shot_clock=setup_runs_shot_clock)
                 if game_state.clock_sec <= 0:
                     # account minutes for the setup time
                     elapsed = max(start_clock - game_state.clock_sec, 0.0)
