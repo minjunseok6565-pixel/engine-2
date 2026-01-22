@@ -539,7 +539,7 @@ def validate_and_fill_era_dict(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Lis
     required_blocks = [
         "shot_base", "pass_base_success",
         "action_outcome_priors", "action_aliases",
-        "off_scheme_action_weights", "def_scheme_action_weights",
+        "off_scheme_action_weights", 
         "offense_scheme_mult", "defense_scheme_mult",
         "prob_model", "knobs",
         "logistic_params", "variance_params",
