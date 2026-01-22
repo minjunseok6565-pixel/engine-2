@@ -10,7 +10,7 @@ from .era import get_defense_meta_params
 from .tactics import TacticsConfig
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 
 # -------------------------
