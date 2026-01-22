@@ -11,7 +11,10 @@ NOTE: Split from sim.py on 2025-12-27.
 """
 
 import random
+import json
+import os
 from itertools import combinations
+from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .core import clamp
@@ -528,56 +531,98 @@ _ROTATION_FATIGUE_EMERGENCY: float = 0.18
 _ROTATION_FATIGUE_CAUTION: float = 0.28  # (soft; currently handled via scoring)
 
 
-_COACH_PRESETS: Dict[str, Dict[str, float]] = {
-    "Balanced": {
-        "depth_n": 9,
-        "planned_change_threshold": 0.30,
-        "clutch_lock_mult": 1.00,
-        "garbage_lock_mult": 1.00,
-    },
-    "Playoff Tight": {
-        "depth_n": 8,
-        "planned_change_threshold": 0.45,
-        "clutch_lock_mult": 1.10,
-        "garbage_lock_mult": 0.70,
-    },
-    "Regular Deep": {
-        "depth_n": 10,
-        "planned_change_threshold": 0.20,
-        "clutch_lock_mult": 0.90,
-        "garbage_lock_mult": 1.10,
-    },
-    "Defense First": {
-        "depth_n": 9,
-        "planned_change_threshold": 0.25,
-        "clutch_lock_mult": 1.00,
-        "garbage_lock_mult": 0.90,
-    },
-    "Offense First": {
-        "depth_n": 9,
-        "planned_change_threshold": 0.25,
-        "clutch_lock_mult": 1.00,
-        "garbage_lock_mult": 0.85,
-    },
-    "Small Ball": {
-        "depth_n": 9,
-        "planned_change_threshold": 0.25,
-        "clutch_lock_mult": 0.95,
-        "garbage_lock_mult": 0.90,
-    },
-    "Development": {
-        "depth_n": 11,
-        "planned_change_threshold": 0.18,
-        "clutch_lock_mult": 0.80,
-        "garbage_lock_mult": 1.15,
-    },
-    "Flow/Reactive": {
-        "depth_n": 9,
-        "planned_change_threshold": 0.15,
-        "clutch_lock_mult": 0.95,
-        "garbage_lock_mult": 1.00,
-    },
-}
+_DEFAULT_BALANCED_PRESET: Dict[str, float] = {
+    "depth_n": 9.0,
+    "planned_change_threshold": 0.30,
+    "clutch_lock_mult": 1.00,
+    "garbage_lock_mult": 1.00,
+ }
+
+_SIM_ROTATION_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_SIM_ROTATION_DIR)
+
+
+def _find_coach_presets_path() -> Optional[str]:
+    """Return a readable coach_presets.json path if it exists (optional)."""
+    env = os.environ.get("COACH_PRESETS_PATH")
+    if env and os.path.exists(env):
+        return env
+
+    filename = "coach_presets.json"
+    candidates = [
+        os.path.join(_PROJECT_DIR, filename),
+        os.path.join(_PROJECT_DIR, "data", filename),
+        os.path.join(_PROJECT_DIR, "config", filename),
+        os.path.join(_SIM_ROTATION_DIR, filename),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _normalize_preset_cfg(cfg: Mapping[str, Any]) -> Dict[str, float]:
+    """Normalize a preset config dict, filling missing keys with Balanced defaults."""
+    out: Dict[str, float] = dict(_DEFAULT_BALANCED_PRESET)
+
+    for k in ("depth_n", "planned_change_threshold", "clutch_lock_mult", "garbage_lock_mult"):
+        if k in cfg:
+            try:
+                out[k] = float(cfg[k])
+            except Exception:
+                pass
+
+    # Sanity
+    try:
+        out["depth_n"] = float(max(5, int(out.get("depth_n", 9))))
+    except Exception:
+        out["depth_n"] = float(_DEFAULT_BALANCED_PRESET["depth_n"])
+
+    return out
+
+
+@lru_cache(maxsize=1)
+def _load_coach_presets() -> Dict[str, Dict[str, float]]:
+    """Load preset definitions from coach_presets.json (optional).
+
+    Accepts formats:
+      {"version": "1.0", "presets": {"Balanced": {...}, ...}}
+      {"Balanced": {...}, ...}  (flat map)
+
+    Always guarantees a usable "Balanced" preset.
+    """
+    path = _find_coach_presets_path()
+    raw_presets: Dict[str, Any] = {}
+
+    if path:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("presets"), dict):
+                raw_presets = dict(data["presets"])
+            elif isinstance(data, dict):
+                # allow flat maps
+                raw_presets = dict(data)
+        except Exception:
+            raw_presets = {}
+
+    presets: Dict[str, Dict[str, float]] = {}
+    for name, cfg in raw_presets.items():
+        if not isinstance(cfg, dict):
+            continue
+        presets[str(name)] = _normalize_preset_cfg(cfg)
+
+    # Ensure Balanced exists
+    if "Balanced" not in presets:
+        presets["Balanced"] = dict(_DEFAULT_BALANCED_PRESET)
+
+    return presets
+
+
+def _get_balanced_preset() -> Dict[str, float]:
+    presets = _load_coach_presets()
+    base = presets.get("Balanced")
+    return dict(base) if isinstance(base, dict) else dict(_DEFAULT_BALANCED_PRESET)
 
 
 def _game_elapsed_sec(game_state: GameState, rules: Mapping[str, Any]) -> int:
@@ -674,14 +719,19 @@ def _rotation_checkpoint_due_and_mark(
 
 def _get_preset_for_team(team: TeamState) -> Dict[str, float]:
     ctx = _get_tactics_context(team)
+    presets = _load_coach_presets()
+    
     is_user = bool(ctx.get("USER_COACH", False))
     if is_user:
-        return dict(_COACH_PRESETS["Balanced"])
+        return _get_balanced_preset()
 
     name = str(ctx.get("COACH_PRESET") or "Balanced")
-    if name not in _COACH_PRESETS:
-        name = "Balanced"
-    return dict(_COACH_PRESETS[name])
+    preset = presets.get(name)
+    if not isinstance(preset, dict):
+        preset = presets.get("Balanced")
+    if not isinstance(preset, dict):
+        preset = _DEFAULT_BALANCED_PRESET
+    return dict(preset)
 
 
 def _coerce_roster_pid_set(team: TeamState) -> Set[str]:
@@ -819,6 +869,7 @@ def maybe_substitute_deadball_v1(
     ctx = _get_tactics_context(team)
     is_user = bool(ctx.get("USER_COACH", False))
     preset = _get_preset_for_team(team)
+    balanced = _get_balanced_preset()
 
     q = int(getattr(game_state, "quarter", 1))
     now = _game_elapsed_sec(game_state, rules)
@@ -862,10 +913,10 @@ def maybe_substitute_deadball_v1(
             eligible_pool = [pid for pid in user_pool if pid in roster_set]
         else:
             # Balanced fallback construction
-            n = int(_COACH_PRESETS["Balanced"]["depth_n"])
+            n = int(balanced.get("depth_n", _DEFAULT_BALANCED_PRESET["depth_n"]))
             eligible_pool = [p.pid for p in (team.lineup or [])[: max(5, n)]]
     else:
-        n = int(preset.get("depth_n", _COACH_PRESETS["Balanced"]["depth_n"]))
+        n = int(preset.get("depth_n", balanced.get("depth_n", _DEFAULT_BALANCED_PRESET["depth_n"])))
         eligible_pool = [p.pid for p in (team.lineup or [])[: max(5, n)]]
 
     # Always include current on-court to keep caller-safe
@@ -991,7 +1042,7 @@ def maybe_substitute_deadball_v1(
     # Planned Change Threshold: applied only in neutral/weak (OFF) situations.
     # (In MID/STRONG clutch/garbage, lineup enforcement is the point.)
     improvement = float(dbg.get("improvement", 0.0))
-    threshold = float(preset.get("planned_change_threshold", _COACH_PRESETS["Balanced"]["planned_change_threshold"]))
+    threshold = float(preset.get("planned_change_threshold", balanced.get("planned_change_threshold", _DEFAULT_BALANCED_PRESET["planned_change_threshold"])))
     if mode == "NEUTRAL" and level == "OFF" and improvement < threshold:
         return False
 
