@@ -499,6 +499,27 @@ def simulate_possession(
                         "pos_start": pos_origin,
                         "first_fga_shotclock_sec": ctx.get("first_fga_shotclock_sec"),
                     }
+                    
+            # NBA-style shot-clock foul top-up:
+            # If a defensive no-shot foul results in an inbounds (offense retains), the shot clock is
+            # topped up to `foul_reset` (e.g., 14) only when the remaining time is below that value.
+            try:
+                foul_reset = float(rules.get("foul_reset", 14))
+            except Exception:
+                foul_reset = 14.0
+            try:
+                full_sc = float(rules.get("shot_clock", 24))
+            except Exception:
+                full_sc = 24.0
+            if foul_reset > 0:
+                foul_reset = min(foul_reset, full_sc)
+                try:
+                    if float(game_state.shot_clock_sec) < foul_reset:
+                        game_state.shot_clock_sec = foul_reset
+                except Exception:
+                    # If shot_clock_sec is missing or invalid, fall back to foul_reset.
+                    game_state.shot_clock_sec = foul_reset
+                    
             return {
                 "end_reason": "TURNOVER",
                 "pos_start_next": "after_tov_dead",
