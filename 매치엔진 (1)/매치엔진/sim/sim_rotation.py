@@ -140,6 +140,7 @@ def pick_desired_five_bruteforce(
     cont_bonus: float = 0.08,       # overlap bonus (stability)
     swap_penalty: float = 0.14,     # change penalty (stability)
     debug_topk: int = 0,            # 0이면 debug 저장 안 함
+    ignore_shape_constraint: bool = False,  # foul-out 등 예외에서 Handler/Big 하드제약 무시
 ) -> Tuple[List[str], Dict[str, Any]]:
     """
     Brute-force choose the best 'Desired 5' for the next stint.
@@ -192,6 +193,9 @@ def pick_desired_five_bruteforce(
 
     def lineup_shape_ok(lineup: Sequence[str]) -> bool:
         # Hard constraint: at least 1 handler AND at least 1 big
+        # NOTE: foul-out forced substitution can override this constraint.
+        if ignore_shape_constraint:
+            return True
         return any(is_handler(pid) for pid in lineup) and any(is_big(pid) for pid in lineup)
 
     def is_eligible(pid: str) -> bool:
@@ -951,6 +955,7 @@ def maybe_substitute_deadball_v1(
             index=index,
             template_lineup=template_lineup,
             lock_mult=lock_mult,
+            ignore_shape_constraint=True,  # foul-out must override roster shape constraints
         )
         desired_set = set(desired5)
         if desired_set != current_set:
