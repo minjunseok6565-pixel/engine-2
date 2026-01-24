@@ -146,6 +146,12 @@ class GameState:
     targets_sec_home: Dict[str, int] = field(default_factory=dict)
     targets_sec_away: Dict[str, int] = field(default_factory=dict)
 
+    # Lineup versioning (for replay seeking / exact on-court reconstruction)
+    # - lineup_version: global monotonic counter for any on-court change (both teams)
+    # - lineup_version_by_team_id: per-team monotonic counter (useful when both teams sub in same stoppage)
+    lineup_version: int = 0
+    lineup_version_by_team_id: Dict[str, int] = field(default_factory=dict)
+
     # --- Timeouts (dead-ball only, v1) ---
     # State dictionaries (keyed by team_id).
     timeouts_remaining: Dict[str, int] = field(default_factory=dict)
