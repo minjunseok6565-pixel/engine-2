@@ -58,7 +58,7 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 def _fmt_clock_mmss(clock_sec: Any) -> str:
     """
-    Format remaining period clock seconds into 'M:SS'.
+    Format remaining period clock seconds into 'MM:SS'.
     - We floor/truncate toward 0 for display (9:32.9 -> 9:32).
     - Clamp negative to 0.
     """
@@ -68,7 +68,26 @@ def _fmt_clock_mmss(clock_sec: Any) -> str:
     s = int(sec)  # truncate
     m = s // 60
     r = s % 60
-    return f"{m}:{r:02d}"
+    return f"{m:02d}:{r:02d}"
+
+def _round_1dp(x: Any) -> Any:
+    """
+    Round numeric values to 1 decimal place (for readability in replay logs).
+    Leaves None and non-numerics untouched.
+    """
+    if x is None:
+        return None
+    try:
+        # bool is int subclass; treat it as non-numeric for rounding purposes
+        if isinstance(x, bool):
+            return x
+        v = float(x)
+        if v < 0:
+            v = 0.0
+        return round(v, 1)
+    except Exception:
+        return x
+
 
 def _compute_game_elapsed_sec(game_state: GameState, rules: Optional[Mapping[str, Any]]) -> int:
     """
@@ -300,7 +319,7 @@ def emit_event(
         "event_type": et,
         "quarter": q,
         "clock_sec": _fmt_clock_mmss(clk),
-        "shot_clock_sec": float(sclk),
+        "shot_clock_sec": _round_1dp(sclk),
         "game_elapsed_sec": ge_sec,
         "possession_index": poss_idx_i,
         "score_home": int(score_home),
@@ -325,6 +344,12 @@ def emit_event(
     if payload:
         for k, v in payload.items():
             evt[k] = v
+            
+    # Readability polish: round any "*_shotclock_sec" fields (payload-derived)
+    # e.g. first_fga_shotclock_sec, etc. Keep as numeric with 1 decimal.
+    for k in list(evt.keys()):
+        if k == "shot_clock_sec" or k.endswith("_shotclock_sec"):
+            evt[k] = _round_1dp(evt.get(k))
 
     # Append (single source of truth)
     game_state.replay_events.append(evt)
