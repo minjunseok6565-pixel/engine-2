@@ -23,6 +23,7 @@ _RESERVED_KEYS: Set[str] = {
     "clock_ms",
     "shot_clock_ms",
     "game_elapsed_sec",
+    "game_elapsed_ms",
     "possession_index",
     "score_home",
     "score_away",
@@ -192,10 +193,16 @@ def emit_event(
     game_state.replay_seq = seq
 
     # Derive team_side/team_id/opp fields with strict validation.
-    ts = str(team_side) if team_side is not None else None
-    tid = str(team_id) if team_id is not None else None
-    os = str(opp_side) if opp_side is not None else None
-    oid = str(opp_team_id) if opp_team_id is not None else None
+    def _norm_opt_str(x: Optional[str]) -> Optional[str]:
+        if x is None:
+            return None
+        s = str(x).strip()
+        return s if s else None
+
+    ts = _norm_opt_str(team_side)
+    tid = _norm_opt_str(team_id)
+    os = _norm_opt_str(opp_side)
+    oid = _norm_opt_str(opp_team_id)
 
     if ts is None and tid is None:
         # Neutral event (period start/end etc.)
@@ -269,6 +276,7 @@ def emit_event(
                 oid = home_team_id if os == "home" else away_team_id
 
     # Build event dict (final spec keys + payload passthrough)
+    ge_sec = int(_compute_game_elapsed_sec(game_state, rules))
     evt: Dict[str, Any] = {
         "seq": seq,
         "event_type": et,
@@ -277,7 +285,8 @@ def emit_event(
         "shot_clock_sec": float(sclk),
         "clock_ms": int(float(clk) * 1000.0),
         "shot_clock_ms": int(float(sclk) * 1000.0),
-        "game_elapsed_sec": int(_compute_game_elapsed_sec(game_state, rules)),
+        "game_elapsed_sec": ge_sec,
+        "game_elapsed_ms": int(ge_sec * 1000),
         "possession_index": poss_idx_i,
         "score_home": int(score_home),
         "score_away": int(score_away),

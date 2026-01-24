@@ -103,14 +103,16 @@ def _infer_home_away_for_event(
     Infer (home_team, away_team, off_side, def_side) for replay logging.
     We prefer ctx['off_team_key']/ctx['def_team_key'] which are "home"/"away" side keys.
     """
-    off_side = str(ctx.get("off_team_key") or "")
-    def_side = str(ctx.get("def_team_key") or "")
+    off_side = str(ctx.get("off_team_key") or "").strip()
+    def_side = str(ctx.get("def_team_key") or "").strip()
 
     # Common case: ctx tells us which TeamState is home.
     if off_side == "home":
-        return offense, defense, off_side, def_side
+        # offense is home
+        return offense, defense, "home", "away"
     if off_side == "away":
-        return defense, offense, off_side, def_side
+        # offense is away
+        return defense, offense, "away", "home"
 
     # Fallback: compare team_id/name against GameState mapping.
     try:
@@ -119,18 +121,18 @@ def _infer_home_away_for_event(
         off_id = str(getattr(offense, "team_id", None) or getattr(offense, "name", "") or "")
         def_id = str(getattr(defense, "team_id", None) or getattr(defense, "name", "") or "")
         if hid and off_id == hid:
-            return offense, defense, off_side, def_side
+            return offense, defense, "home", "away"
         if hid and def_id == hid:
-            return defense, offense, off_side, def_side
+            return defense, offense, "away", "home"
         if aid and off_id == aid:
-            return defense, offense, off_side, def_side
+            return defense, offense, "away", "home"
         if aid and def_id == aid:
-            return offense, defense, off_side, def_side
+            return offense, defense, "home", "away"
     except Exception:
         pass
 
-    # Last resort: assume offense==home (safe for logging; emit_event will still attach mapping).
-    return offense, defense, off_side, def_side
+    # Last resort: assume offense==home (ensures non-empty valid team_side for logging).
+    return offense, defense, "home", "away"
 
 
 def _sync_scores_for_event(game_state: GameState, home: TeamState, away: TeamState) -> None:
@@ -877,7 +879,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(off_side or ctx.get("off_team_key") or ""),
+                    team_side=off_side,
                     pos_start=str(pos_origin),
                     pos_start_next="after_tov_dead",
                     outcome="TO_SHOT_CLOCK",
@@ -942,7 +944,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(off_side or ctx.get("off_team_key") or ""),
+                    team_side=off_side,
                     pos_start=str(pos_origin),
                     pos_start_next="after_score",
                     **rp,
@@ -1008,7 +1010,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(off_side or ctx.get("off_team_key") or ""),
+                    team_side=off_side,
                     pos_start=str(pos_origin),
                     pos_start_next=str(pos_start_next),
                     pos_start_next_override=pstart_override_for_log,
@@ -1040,7 +1042,9 @@ def simulate_possession(
                 foul_side = None
                 if isinstance(payload, dict):
                     foul_side = payload.get("fouler_team")
-                foul_side = str(foul_side or def_side or ctx.get("def_team_key") or "")
+                foul_side = str(foul_side or def_side).strip()
+                if foul_side not in ("home", "away"):
+                    foul_side = def_side
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -1075,7 +1079,9 @@ def simulate_possession(
                 foul_side = None
                 if isinstance(payload, dict):
                     foul_side = payload.get("fouler_team")
-                foul_side = str(foul_side or def_side or ctx.get("def_team_key") or "")
+                foul_side = str(foul_side or def_side).strip()
+                if foul_side not in ("home", "away"):
+                    foul_side = def_side
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -1159,7 +1165,7 @@ def simulate_possession(
                         home=home_team,
                         away=away_team,
                         rules=rules,
-                        team_side=str(off_side or ctx.get("off_team_key") or ""),
+                        team_side=off_side,
                         pos_start=str(pos_origin),
                         pid=getattr(rbd, "pid", None),
                         outcome="ORB",
@@ -1193,7 +1199,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(def_side or ctx.get("def_team_key") or ""),
+                    team_side=def_side,
                     pos_start=str(pos_origin),
                     pid=getattr(rbd, "pid", None),
                     outcome="DRB",
@@ -1247,7 +1253,7 @@ def simulate_possession(
                             home=home_team,
                             away=away_team,
                             rules=rules,
-                            team_side=str(off_side or ctx.get("off_team_key") or ""),
+                            team_side=off_side,
                             pos_start=str(pos_origin),
                             pos_start_next="after_block_oob",
                             deadball_reason="BLOCK_OOB",
@@ -1279,7 +1285,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(off_side or ctx.get("off_team_key") or ""),
+                    team_side=off_side,
                     pos_start=str(pos_origin),
                     **rp,
                 )
@@ -1321,7 +1327,7 @@ def simulate_possession(
                         home=home_team,
                         away=away_team,
                         rules=rules,
-                        team_side=str(off_side or ctx.get("off_team_key") or ""),
+                        team_side=off_side,
                         pos_start=str(pos_origin),
                         pid=getattr(rbd, "pid", None),
                         outcome="ORB",
@@ -1354,7 +1360,7 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=str(def_side or ctx.get("def_team_key") or ""),
+                    team_side=def_side,
                     pos_start=str(pos_origin),
                     pid=getattr(rbd, "pid", None),
                     outcome="DRB",
