@@ -219,6 +219,7 @@ def maybe_timeout_deadball(
         home=home,
         away=away,
         rules=rules,
+        include_lineups=True,
         team_side=str(side),
         pos_start=str(pos_start),
         reason=str(reason),
