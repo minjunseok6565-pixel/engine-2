@@ -26,6 +26,13 @@ _RESERVED_KEYS: Set[str] = {
     "score_away",
     "home_team_id",
     "away_team_id",
+    # lineup context (owned by emitter)
+    "lineup_version",
+    "lineup_version_team",
+    "lineup_version_by_team_id",
+    "on_court_home",
+    "on_court_away",
+    "on_court_by_team_id",
     # team mapping
     "team_side",
     "team_id",
@@ -179,6 +186,9 @@ def emit_event(
     pos_start_next_override: Optional[str] = None,
     # some callers (e.g. timeout) may want to override possession index snapshot
     possession_index: Optional[int] = None,
+    # include on-court snapshots (for replay seeking / exact on-court reconstruction)
+    # when True: emits on_court_* and lineup_version_by_team_id in a standard format
+    include_lineups: bool = False,
     # strict validation: mismatched team_side/team_id is a hard error (prevents bad logs)
     strict: bool = True,
     **payload: Any,
@@ -191,6 +201,11 @@ def emit_event(
     - common context auto-filled from game_state + home/away
     - team_side<->team_id derived and validated
     - payload keys are copied as-is (but cannot override reserved context keys)
+    - lineup_version is always included (global monotonic counter, if present on GameState)
+    - if include_lineups=True, emitter attaches:
+        - on_court_home / on_court_away (lists of pids)
+        - on_court_by_team_id ({home_team_id: [...], away_team_id: [...]})
+        - lineup_version_by_team_id (dict copy, if present)
     """
     # Disallow accidental context overrides (prevents subtle duplicate/incorrect logs).
     bad = [k for k in payload.keys() if k in _RESERVED_KEYS]
@@ -314,6 +329,17 @@ def emit_event(
 
     # Build event dict (final spec keys + payload passthrough)
     ge_sec = int(_compute_game_elapsed_sec(game_state, rules))
+
+    # Lineup version snapshot (always included for deterministic seeking)
+    lv_global = _safe_int(getattr(game_state, "lineup_version", 0), 0)
+    lv_team: Optional[int] = None
+    lvt_map = getattr(game_state, "lineup_version_by_team_id", None)
+    if tid is not None and isinstance(lvt_map, dict):
+        try:
+            lv_team = _safe_int(lvt_map.get(tid, 0), 0)
+        except Exception:
+            lv_team = None
+
     evt: Dict[str, Any] = {
         "seq": seq,
         "event_type": et,
@@ -326,11 +352,26 @@ def emit_event(
         "score_away": int(score_away),
         "home_team_id": home_team_id,
         "away_team_id": away_team_id,
+        "lineup_version": int(lv_global),
         "team_side": ts,
         "team_id": tid,
         "opp_side": os,
         "opp_team_id": oid,
     }
+
+    # Team-specific lineup version (only when this event has a subject team)
+    if lv_team is not None:
+        evt["lineup_version_team"] = int(lv_team)
+
+    # Optional lineup snapshots (standard format)
+    if include_lineups:
+        on_home = list(getattr(game_state, "on_court_home", []) or [])
+        on_away = list(getattr(game_state, "on_court_away", []) or [])
+        evt["on_court_home"] = on_home
+        evt["on_court_away"] = on_away
+        evt["on_court_by_team_id"] = {home_team_id: on_home, away_team_id: on_away}
+        if isinstance(lvt_map, dict):
+            evt["lineup_version_by_team_id"] = dict(lvt_map)
 
     # Flow keys (standardized names)
     if pos_start is not None:
