@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional, List
 from .core import ENGINE_VERSION, make_replay_token, clamp
 from .models import GameState, TeamState
 from .replay import emit_event
+from .state_dicts import SideKeyedDict, StrictSideKeyedDict
 from .validation import (
     ValidationConfig,
     ValidationReport,
@@ -35,64 +36,6 @@ from .team_keys import AWAY, HOME, team_key
 from .sim_possession import simulate_possession
 
 
-# -------------------------
-# Side-key adapter for team-id keyed state dicts
-# -------------------------
-class SideKeyedDict(dict):
-    """dict that stores values by team_id but allows HOME/AWAY side-key access.
-
-    This lets the engine keep using side keys ('home'/'away') in internal logic while
-    keeping GameState's team-scoped state keyed by stable team_id strings.
-    """
-
-    def __init__(self, side_to_team_id: Dict[str, str], initial: Optional[Dict[Any, Any]] = None, **kwargs: Any):
-        super().__init__()
-        self._side_to_team_id = dict(side_to_team_id or {})
-        if initial:
-            self.update(initial)
-        if kwargs:
-            self.update(kwargs)
-
-    def _k(self, key: Any) -> Any:
-        try:
-            return self._side_to_team_id.get(str(key), key)
-        except Exception:
-            return key
-
-    def __getitem__(self, key: Any) -> Any:
-        return super().__getitem__(self._k(key))
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        super().__setitem__(self._k(key), value)
-
-    def __delitem__(self, key: Any) -> None:
-        super().__delitem__(self._k(key))
-
-    def __contains__(self, key: object) -> bool:
-        try:
-            return super().__contains__(self._k(key))  # type: ignore[arg-type]
-        except Exception:
-            return super().__contains__(key)  # type: ignore[arg-type]
-
-    def get(self, key: Any, default: Any = None) -> Any:  # noqa: A003 (shadow built-in)
-        return super().get(self._k(key), default)
-
-    def setdefault(self, key: Any, default: Any = None) -> Any:
-        return super().setdefault(self._k(key), default)
-
-    def pop(self, key: Any, default: Any = None) -> Any:  # noqa: A003 (shadow built-in)
-        return super().pop(self._k(key), default)
-
-    def update(self, other: Optional[Dict[Any, Any]] = None, /, **kwargs: Any) -> None:  # type: ignore[override]
-        if other:
-            if hasattr(other, "items"):
-                for k, v in other.items():  # type: ignore[union-attr]
-                    super().__setitem__(self._k(k), v)
-            else:
-                for k, v in other:  # type: ignore[assignment]
-                    super().__setitem__(self._k(k), v)
-        for k, v in kwargs.items():
-            super().__setitem__(self._k(k), v)
 # -------------------------
 # Rotation plan helpers
 # -------------------------
@@ -391,7 +334,9 @@ def simulate_game(
         # Team-scoped state is stored by team_id, but legacy side-key access is supported via SideKeyedDict.
         team_fouls=SideKeyedDict(side_to_team_id, {home_team_id: 0, away_team_id: 0}),
         player_fouls=SideKeyedDict(side_to_team_id, {home_team_id: {}, away_team_id: {}}),
-        fatigue=SideKeyedDict(
+        # Fatigue is a critical state input for AI/rotation/tuning: use STRICT mapping to
+        # catch any accidental wrong-team key writes early.
+        fatigue=StrictSideKeyedDict(
             side_to_team_id,
             {
                 home_team_id: {p.pid: 1.0 for p in home.lineup},
