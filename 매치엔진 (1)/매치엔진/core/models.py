@@ -152,10 +152,6 @@ class GameState:
     timeouts_used: Dict[str, int] = field(default_factory=dict)
     timeout_last_possession: Dict[str, int] = field(default_factory=dict)
 
-    # DEPRECATED (migration-only): timeout_log will be removed once TIMEOUT events
-    # are emitted exclusively to replay_events (single source of truth).
-    timeout_log: List[Dict[str, Any]] = field(default_factory=list)
-
     # --- Flow trackers for timeout AI ---
     # Run is tracked as "consecutive scoring points by the same team" (no opponent score in between).
     run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)   # {team_id: run_pts}
