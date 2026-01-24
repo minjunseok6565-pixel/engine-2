@@ -14,7 +14,7 @@ _DEADBALL_STARTS = {"start_q", "after_score", "after_tov_dead", "after_foul", "a
 def _team_key(game_state: Any, side_or_team_id: str) -> str:
     """
     Convert HOME/AWAY side to stable team_id using game_state.side_to_team_id.
-    If mapping is unavailable, returns the input key (legacy/standalone-safe).
+    If mapping is unavailable, returns the input key.
     """
     try:
         st = getattr(game_state, "side_to_team_id", None)
@@ -27,26 +27,6 @@ def _team_key(game_state: Any, side_or_team_id: str) -> str:
     return str(side_or_team_id)
 
 
-def _migrate_side_keys_to_team_ids(d: Any, game_state: Any) -> None:
-    """
-    If a dict still contains legacy "home"/"away" keys after team mapping exists,
-    migrate values into team_id keys and delete the legacy keys to prevent duplicates.
-    """
-    if not isinstance(d, dict):
-        return
-    try:
-        hk = _team_key(game_state, HOME)
-        ak = _team_key(game_state, AWAY)
-        if HOME in d and hk != HOME:
-            d.setdefault(hk, d.get(HOME))
-            del d[HOME]
-        if AWAY in d and ak != AWAY:
-            d.setdefault(ak, d.get(AWAY))
-            del d[AWAY]
-    except Exception:
-        return
-
-
 def ensure_timeout_state(game_state: Any, rules: Dict[str, Any]) -> None:
     """Initialize timeout-related state on GameState (idempotent)."""
     to_rules = rules.get("timeouts", {}) if isinstance(rules, dict) else {}
@@ -55,40 +35,20 @@ def ensure_timeout_state(game_state: Any, rules: Dict[str, Any]) -> None:
     hk = _team_key(game_state, HOME)
     ak = _team_key(game_state, AWAY)
 
-    if not isinstance(getattr(game_state, "timeouts_remaining", None), dict) or not getattr(game_state, "timeouts_remaining", None):
-        game_state.timeouts_remaining = {hk: per_team, ak: per_team}
-    else:
-        _migrate_side_keys_to_team_ids(game_state.timeouts_remaining, game_state)
-        game_state.timeouts_remaining.setdefault(hk, per_team)
-        game_state.timeouts_remaining.setdefault(ak, per_team)
+    def _ensure_team_dict_attr(attr: str, default_val: int) -> None:
+        d = getattr(game_state, attr, None)
+        if not isinstance(d, dict):
+            d = {}
+            setattr(game_state, attr, d)
+        # Keyed ONLY by team_id (hk/ak). No side-key migration/deletion.
+        d.setdefault(hk, default_val)
+        d.setdefault(ak, default_val)
 
-    if not isinstance(getattr(game_state, "timeouts_used", None), dict) or not getattr(game_state, "timeouts_used", None):
-        game_state.timeouts_used = {hk: 0, ak: 0}
-    else:
-        _migrate_side_keys_to_team_ids(game_state.timeouts_used, game_state)
-        game_state.timeouts_used.setdefault(hk, 0)
-        game_state.timeouts_used.setdefault(ak, 0)
-
-    if not isinstance(getattr(game_state, "timeout_last_possession", None), dict) or not getattr(game_state, "timeout_last_possession", None):
-        game_state.timeout_last_possession = {hk: -999999, ak: -999999}
-    else:
-        _migrate_side_keys_to_team_ids(game_state.timeout_last_possession, game_state)
-        game_state.timeout_last_possession.setdefault(hk, -999999)
-        game_state.timeout_last_possession.setdefault(ak, -999999)
-
-    if not isinstance(getattr(game_state, "run_pts_by_scoring_side", None), dict) or not getattr(game_state, "run_pts_by_scoring_side", None):
-        game_state.run_pts_by_scoring_side = {hk: 0, ak: 0}
-    else:
-        _migrate_side_keys_to_team_ids(game_state.run_pts_by_scoring_side, game_state)
-        game_state.run_pts_by_scoring_side.setdefault(hk, 0)
-        game_state.run_pts_by_scoring_side.setdefault(ak, 0)
-
-    if not isinstance(getattr(game_state, "consecutive_team_tos", None), dict) or not getattr(game_state, "consecutive_team_tos", None):
-        game_state.consecutive_team_tos = {hk: 0, ak: 0}
-    else:
-        _migrate_side_keys_to_team_ids(game_state.consecutive_team_tos, game_state)
-        game_state.consecutive_team_tos.setdefault(hk, 0)
-        game_state.consecutive_team_tos.setdefault(ak, 0)
+    _ensure_team_dict_attr("timeouts_remaining", per_team)
+    _ensure_team_dict_attr("timeouts_used", 0)
+    _ensure_team_dict_attr("timeout_last_possession", -999999)
+    _ensure_team_dict_attr("run_pts_by_scoring_side", 0)
+    _ensure_team_dict_attr("consecutive_team_tos", 0)
 
     # last_scoring_side is optional; leave as-is if already present
 
