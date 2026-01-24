@@ -521,6 +521,8 @@ def _emit_substitution(
     reason: str,
     before_on: List[str],
     after_on: List[str],
+    lineup_version_before: Optional[int] = None,
+    lineup_version_after: Optional[int] = None,
 ) -> None:
     """
     Emit a single SUBSTITUTION replay event for a team based on on-court diff.
@@ -552,6 +554,24 @@ def _emit_substitution(
         away_pts = int(getattr(game_state, "score_away", 0) or 0)
         away_for_event = _TeamStub(away_id, away_pts)
 
+    extra: Dict[str, Any] = {
+        "sub_out_pids": sub_out,
+        "sub_in_pids": sub_in,
+        "reason": str(reason),
+        "on_court_before": list(before_on or []),
+        "on_court_after": list(after_on or []),
+    }
+    if lineup_version_before is not None:
+        try:
+            extra["lineup_version_before"] = int(lineup_version_before)
+        except Exception:
+            extra["lineup_version_before"] = lineup_version_before
+    if lineup_version_after is not None:
+        try:
+            extra["lineup_version_after"] = int(lineup_version_after)
+        except Exception:
+            extra["lineup_version_after"] = lineup_version_after
+
     emit_event(
         game_state,
         event_type="SUBSTITUTION",
@@ -560,18 +580,67 @@ def _emit_substitution(
         rules=rules,
         team_side=side,
         pos_start=str(pos_start),
-        sub_out_pids=sub_out,
-        sub_in_pids=sub_in,
-        reason=str(reason),
+        include_lineups=True,
+        **extra,
     )
 
 
-def _set_on_court(game_state: GameState, team: TeamState, home: TeamState, players: List[str]) -> None:
+def _set_on_court(
+    game_state: GameState,
+    team: TeamState,
+    home: TeamState,
+    players: List[str],
+    *,
+    bump_version: bool = True,
+) -> None:
+    """
+    Update TeamState on-court pids and mirror them into GameState.
+
+    If bump_version=True and the on-court set actually changes, increments:
+    - game_state.lineup_version (global)
+    - game_state.lineup_version_by_team_id[team_id] (team-scoped)
+
+    NOTE: "team_id" is derived via team_key(team, home) -> _state_team_key(...)
+    so state is stable even when side keys ("home"/"away") are used elsewhere.
+    """
+    # Snapshot current on-court (from GameState, not TeamState) for change detection.
+    before_on = list(game_state.on_court_home if team is home else game_state.on_court_away)
+    before_set = set(before_on or [])
+
+    # Apply to team and mirror into GameState.
     team.set_on_court(list(players))
+    after_on = list(team.on_court_pids)
     if team is home:
-        game_state.on_court_home = list(team.on_court_pids)
+        game_state.on_court_home = list(after_on)
     else:
-        game_state.on_court_away = list(team.on_court_pids)
+        game_state.on_court_away = list(after_on)
+
+    # Version bump only when the on-court set actually changes.
+    if not bump_version:
+        return
+    after_set = set(after_on or [])
+    if before_set == after_set:
+        return
+
+    # Global version
+    try:
+        lv = int(getattr(game_state, "lineup_version", 0) or 0)
+    except Exception:
+        lv = 0
+    game_state.lineup_version = int(lv) + 1
+
+    # Team-scoped version (keyed by stable team_id when available)
+    side = str(team_key(team, home))
+    team_id = _state_team_key(game_state, side)
+    lvt = getattr(game_state, "lineup_version_by_team_id", None)
+    if not isinstance(lvt, dict):
+        lvt = {}
+        game_state.lineup_version_by_team_id = lvt
+    try:
+        tlv = int(lvt.get(team_id, 0) or 0)
+    except Exception:
+        tlv = 0
+    lvt[str(team_id)] = int(tlv) + 1
 
 
 def _update_minutes(
@@ -1035,7 +1104,9 @@ def maybe_substitute_deadball_v1(
         desired_set = set(desired5)
         if desired_set != current_set:
             before = list(on_court)
+            lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
             _set_on_court(game_state, team, home, list(desired5))
+            lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
@@ -1046,7 +1117,8 @@ def maybe_substitute_deadball_v1(
                 _emit_substitution(
                     game_state=game_state, rules=rules, home=home, team=team,
                     pos_start=pos_start, reason="FOUL_OUT",
-                    before_on=before, after_on=after
+                    before_on=before, after_on=after,
+                    lineup_version_before=lv_before, lineup_version_after=lv_after
                 )
             except Exception:
                 pass
@@ -1075,7 +1147,9 @@ def maybe_substitute_deadball_v1(
         desired_set = set(desired5)
         if desired_set != current_set:
             before = list(on_court)
+            lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
             _set_on_court(game_state, team, home, list(desired5))
+            lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
@@ -1086,7 +1160,8 @@ def maybe_substitute_deadball_v1(
                 _emit_substitution(
                     game_state=game_state, rules=rules, home=home, team=team,
                     pos_start=pos_start, reason="FATIGUE_EMERGENCY",
-                    before_on=before, after_on=after
+                    before_on=before, after_on=after,
+                    lineup_version_before=lv_before, lineup_version_after=lv_after
                 )
             except Exception:
                 pass
@@ -1234,7 +1309,9 @@ def maybe_substitute_deadball_v1(
     # Apply + update trackers
     prev_set = set(on_court)
     before = list(on_court)
+    lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
     _set_on_court(game_state, team, home, list(new_on_court)[:5])
+    lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
     game_state.rotation_last_sub_game_sec[key] = int(now)
 
     last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
@@ -1247,7 +1324,8 @@ def maybe_substitute_deadball_v1(
         _emit_substitution(
             game_state=game_state, rules=rules, home=home, team=team,
             pos_start=pos_start, reason="PLANNED",
-            before_on=before, after_on=after
+            before_on=before, after_on=after,
+            lineup_version_before=lv_before, lineup_version_after=lv_after
         )
     except Exception:
         pass
