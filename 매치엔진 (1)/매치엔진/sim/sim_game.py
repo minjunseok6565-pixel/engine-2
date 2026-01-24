@@ -385,6 +385,26 @@ def simulate_game(
     replay_token = ""
     debug_errors: List[Dict[str, Any]] = []
 
+    def _push_debug_error(where: str, exc: Exception, extra: Optional[Dict[str, Any]] = None) -> None:
+        """Record non-fatal internal errors instead of silently swallowing them.
+
+        We intentionally keep simulation running, but we must never lose visibility
+        into missing replay events / timeout-sub windows due to exceptions.
+        """
+        err: Dict[str, Any] = {
+            "where": str(where),
+            "quarter": int(getattr(game_state, "quarter", 0) or 0),
+            "clock_sec": float(getattr(game_state, "clock_sec", 0.0) or 0.0),
+            "shot_clock_sec": float(getattr(game_state, "shot_clock_sec", 0.0) or 0.0),
+            "possession": int(getattr(game_state, "possession", 0) or 0),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        if isinstance(extra, dict):
+            for k, v in extra.items():
+                if k not in err:
+                    err[k] = v
+        debug_errors.append(err)
+   
     # Dead-ball windows where substitutions are allowed.
     # NOTE: start_q is treated as a dead-ball window ONLY for Q2+ (and OT),
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
@@ -435,9 +455,17 @@ def simulate_game(
                 pressure_index=float(pressure_index),
                 garbage_index=float(garbage_index),
             )
-        except Exception:
+        except Exception as e:
             # Sub logic must never break simulation.
-            pass
+            _push_debug_error(
+                "rotation.sub_window_deadball",
+                e,
+                {
+                    "q_index": int(q_index),
+                    "pos_start": str(pos_start),
+                    "timeout_evt": bool(timeout_evt),
+                },
+            )
 
     def _play_period(q: int, period_length_sec: float) -> None:
         nonlocal total_possessions, replay_token
@@ -470,8 +498,12 @@ def simulate_game(
                 rules=rules,
                 pos_start="start_q",
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _push_debug_error(
+                "replay.emit_event.PERIOD_START",
+                e,
+                {"event_type": "PERIOD_START", "q_index": int(q), "pos_start": "start_q"},
+            )
 
         # Possession-continuation state: some dead-ball events (e.g. no-shot foul) can stop play
         # and restart with the same offense. In those cases we re-enter the loop without counting
@@ -599,9 +631,16 @@ def simulate_game(
                     if break_sec > 0:
                         _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
                         _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
-            except Exception:
+            except Exception as e:
                 # Timeout logic must never break simulation.
-                pass
+                _push_debug_error(
+                    "timeout.deadball_phase",
+                    e,
+                    {
+                        "pos_start": str(pos_start),
+                        "next_offense_side": str(team_key(offense, home)),
+                    },
+                )
 
             # --- Substitution window (dead-ball only, 8-A ready) ---
             # Substitutions are allowed ONLY on dead-ball windows:
@@ -760,8 +799,12 @@ def simulate_game(
                         team_side=str(off_key),
                         pos_start=str(pos_start),
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    _push_debug_error(
+                        "replay.emit_event.POSSESSION_START",
+                        e,
+                        {"event_type": "POSSESSION_START", "team_side": str(off_key), "pos_start": str(pos_start)},
+                    )
 
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
             pos_errors = ctx.get("errors") if isinstance(ctx, dict) else None
@@ -840,8 +883,12 @@ def simulate_game(
                     pos_start_next=pos_res.get("pos_start_next"),
                     pos_start_next_override=pos_res.get("pos_start_next_override"),
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _push_debug_error(
+                    "replay.emit_event.POSSESSION_END",
+                    e,
+                    {"event_type": "POSSESSION_END", "team_side": str(off_key), "end_reason": pos_res.get("end_reason")},
+                )
 
             pts_scored = int(pos_res.get("points_scored", 0))
             had_orb = bool(pos_res.get("had_orb", False))
@@ -873,8 +920,12 @@ def simulate_game(
             # This drives run/turnover-streak triggers for future dead-ball timeouts.
             try:
                 update_timeout_trackers(game_state, offense_side=str(off_key), pos_res=pos_res)
-            except Exception:
-                pass
+            except Exception as e:
+                _push_debug_error(
+                    "timeout.update_timeout_trackers",
+                    e,
+                    {"offense_side": str(off_key), "end_reason": pos_res.get("end_reason")},
+                )
 
             total_possessions += 1
             game_state.score_home = home.pts
@@ -899,8 +950,12 @@ def simulate_game(
                 away=away,
                 rules=rules,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _push_debug_error(
+                "replay.emit_event.PERIOD_END",
+                e,
+                {"event_type": "PERIOD_END", "q_index": int(q)},
+            )
 
         replay_token = make_replay_token(rng, home, away, era=era)
 
