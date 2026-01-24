@@ -102,34 +102,65 @@ DERIVED_DEFAULT = 50.0
 
 @dataclass
 class GameState:
+    # Core clock/score context (current quarter remaining seconds).
     quarter: int
-    clock_sec: int
-    shot_clock_sec: int
+    clock_sec: float
+    shot_clock_sec: float
     score_home: int
     score_away: int
+
+    # Possession counter (monotonic, increments per possession)
     possession: int = 0
-    team_fouls: Dict[str, int] = field(default_factory=dict)
-    player_fouls: Dict[str, Dict[str, int]] = field(default_factory=dict)
+
+    # ---------------------------------------------------------------------
+    # Team identity mapping (fixed for the game; initialized in sim_game.py)
+    # ---------------------------------------------------------------------
+    # NOTE: Engine internals may still compute using "home"/"away" side labels,
+    # but all team-keyed *state* dicts are standardized on team_id.
+    home_team_id: Optional[str] = None
+    away_team_id: Optional[str] = None
+    side_to_team_id: Dict[str, str] = field(default_factory=dict)   # {"home": "LAL", "away": "BOS"}
+    team_id_to_side: Dict[str, str] = field(default_factory=dict)   # {"LAL": "home", "BOS": "away"}
+
+    # ---------------------------------------------------------------------
+    # Replay / Play-by-play (single source of truth)
+    # ---------------------------------------------------------------------
+    # - replay_seq: event sequence counter (1..N) managed by emit_event()
+    # - replay_events: append-only list of replay_event dicts
+    replay_seq: int = 0
+    replay_events: List[Dict[str, Any]] = field(default_factory=list)
+
+    # ---------------------------------------------------------------------
+    # Team/player state trackers (keyed by team_id)
+    # ---------------------------------------------------------------------
+    team_fouls: Dict[str, int] = field(default_factory=dict)                # {team_id: fouls}
+    player_fouls: Dict[str, Dict[str, int]] = field(default_factory=dict)   # {team_id: {pid: fouls}}
     # Per-team, per-player minutes played tracked in **seconds**.
     # Use float to avoid systematic undercount from truncation when segment lengths are fractional.
-    minutes_played_sec: Dict[str, Dict[str, float]] = field(default_factory=dict)
-    fatigue: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    minutes_played_sec: Dict[str, Dict[str, float]] = field(default_factory=dict)  # {team_id: {pid: sec}}
+    fatigue: Dict[str, Dict[str, float]] = field(default_factory=dict)             # {team_id: {pid: energy}}
+
+    # On-court snapshots (side-oriented; used for rotation/sub windows and validation)
     on_court_home: List[str] = field(default_factory=list)
     on_court_away: List[str] = field(default_factory=list)
     targets_sec_home: Dict[str, int] = field(default_factory=dict)
     targets_sec_away: Dict[str, int] = field(default_factory=dict)
 
     # --- Timeouts (dead-ball only, v1) ---
+    # State dictionaries (keyed by team_id).
     timeouts_remaining: Dict[str, int] = field(default_factory=dict)
     timeouts_used: Dict[str, int] = field(default_factory=dict)
     timeout_last_possession: Dict[str, int] = field(default_factory=dict)
+
+    # DEPRECATED (migration-only): timeout_log will be removed once TIMEOUT events
+    # are emitted exclusively to replay_events (single source of truth).
     timeout_log: List[Dict[str, Any]] = field(default_factory=list)
- 
+
     # --- Flow trackers for timeout AI ---
-    # Run is tracked as "consecutive scoring points by the same side" (no opponent score in between).
-    run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)
-    # Consecutive team turnovers are tracked per-team possessions (only updates when that team is on offense).
-    consecutive_team_tos: Dict[str, int] = field(default_factory=dict)
+    # Run is tracked as "consecutive scoring points by the same team" (no opponent score in between).
+    run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)   # {team_id: run_pts}
+    # Consecutive team turnovers tracked per team possessions (only updates when that team is on offense).
+    consecutive_team_tos: Dict[str, int] = field(default_factory=dict)       # {team_id: n}
     last_scoring_side: Optional[str] = None
 
     # --- Substitution system (rotation v1.0) ---
@@ -141,14 +172,15 @@ class GameState:
     garbage_level: str = "OFF"       # "OFF" | "MID" | "STRONG"
 
     # Rotation state trackers (per-team)
-    # - rotation_last_sub_game_sec: last substitution game-time (elapsed seconds) per team key
-    # - rotation_last_in_game_sec: last time a player entered the court (elapsed seconds) per team key
-    # - rotation_checkpoint_mask: checkpoint processed flags (bitmask) per team key for the current quarter
+    # - rotation_last_sub_game_sec: last substitution game-time (elapsed seconds) per team_id
+    # - rotation_last_in_game_sec: last time a player entered the court (elapsed seconds) per team_id
+    # - rotation_checkpoint_mask: checkpoint processed flags (bitmask) per team_id for the current quarter
     # - rotation_checkpoint_quarter: last quarter number in which the team's checkpoint mask was initialized/reset
     rotation_last_sub_game_sec: Dict[str, int] = field(default_factory=dict)
     rotation_last_in_game_sec: Dict[str, Dict[str, int]] = field(default_factory=dict)
     rotation_checkpoint_mask: Dict[str, int] = field(default_factory=dict)
     rotation_checkpoint_quarter: Dict[str, int] = field(default_factory=dict)
+
 
 @dataclass
 class Player:
@@ -172,6 +204,8 @@ class TeamState:
     lineup: List[Player]
     roles: Dict[str, str]  # role -> pid (chosen via UI)
     tactics: "TacticsConfig"
+    # Stable identifier used for persistence/UI. When None, `name` is treated as team_id.
+    team_id: Optional[str] = None
     on_court_pids: List[str] = field(default_factory=list)
 
 

@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from .core import clamp
 from .models import GameState, TeamState
 from .team_keys import team_key
+from .replay import emit_event
 
 
 # -------------------------
@@ -494,6 +495,77 @@ def _get_on_court(game_state: GameState, team: TeamState, home: TeamState) -> Li
     return game_state.on_court_home if team is home else game_state.on_court_away
 
 
+def _state_team_key(game_state: GameState, side_key: str) -> str:
+    """
+    Convert "home"/"away" side key into stable team_id for team-scoped state dicts.
+    Falls back to the side key if mapping is unavailable.
+    """
+    try:
+        st = getattr(game_state, "side_to_team_id", None)
+        if isinstance(st, dict):
+            v = st.get(str(side_key))
+            if v:
+                return str(v)
+    except Exception:
+        pass
+    return str(side_key)
+
+
+def _emit_substitution(
+    *,
+    game_state: GameState,
+    rules: Mapping[str, Any],
+    home: TeamState,
+    team: TeamState,
+    pos_start: str,
+    reason: str,
+    before_on: List[str],
+    after_on: List[str],
+) -> None:
+    """
+    Emit a single SUBSTITUTION replay event for a team based on on-court diff.
+    (단일 기록 원칙: 교체 사건은 여기서만 1회 emit)
+    """
+    before_set = set(before_on or [])
+    after_set = set(after_on or [])
+    if before_set == after_set:
+        return
+
+    sub_out = sorted(list(before_set - after_set))
+    sub_in = sorted(list(after_set - before_set))
+
+    # Determine team_side (subject team) for the event.
+    side = str(team_key(team, home))
+
+    # We might not always have the true away TeamState in this module call-path.
+    # - If team != home, team is almost certainly the away team -> use it.
+    # - If team == home, build a minimal away stub from game_state mapping/scores.
+    away_for_event: Any = team if team is not home else None
+    if away_for_event is None:
+        class _TeamStub:
+            def __init__(self, name: str, pts: int):
+                self.name = name
+                self.team_id = name
+                self.pts = int(pts)
+
+        away_id = str(getattr(game_state, "away_team_id", None) or "AWAY")
+        away_pts = int(getattr(game_state, "score_away", 0) or 0)
+        away_for_event = _TeamStub(away_id, away_pts)
+
+    emit_event(
+        game_state,
+        event_type="SUBSTITUTION",
+        home=home,
+        away=away_for_event,
+        rules=rules,
+        team_side=side,
+        pos_start=str(pos_start),
+        sub_out_pids=sub_out,
+        sub_in_pids=sub_in,
+        reason=str(reason),
+    )
+
+
 def _set_on_court(game_state: GameState, team: TeamState, home: TeamState, players: List[str]) -> None:
     team.set_on_court(list(players))
     if team is home:
@@ -512,7 +584,8 @@ def _update_minutes(
     # Track seconds with sub-second precision to avoid systematic undercount
     # when segment lengths are fractional (e.g., 3.2s, 2.6s, ...).
     inc = float(max(delta_sec, 0.0))
-    key = team_key(team, home)
+    side = team_key(team, home)
+    key = _state_team_key(game_state, str(side))
     mins_map = game_state.minutes_played_sec.setdefault(key, {})
     for pid in pids:
         mins_map[pid] = float(mins_map.get(pid, 0.0)) + inc
@@ -844,7 +917,8 @@ def ensure_rotation_v1_state(game_state: GameState, home: TeamState, away: TeamS
     now = _game_elapsed_sec(game_state, rules)
 
     for team in (home, away):
-        k = team_key(team, home)
+        side = str(team_key(team, home))
+        k = _state_team_key(game_state, side)
         _ensure_rotation_team_state(game_state, k, quarter=q)
 
         # If on-court already populated, initialize last-in timestamps for those pids.
@@ -880,7 +954,8 @@ def maybe_substitute_deadball_v1(
     q = int(getattr(game_state, "quarter", 1))
     now = _game_elapsed_sec(game_state, rules)
 
-    key = team_key(team, home)
+    side = str(team_key(team, home))
+    key = _state_team_key(game_state, side)
     _ensure_rotation_team_state(game_state, key, quarter=q)
 
     foul_out = int(rules.get("foul_out", 6))
@@ -959,12 +1034,22 @@ def maybe_substitute_deadball_v1(
         )
         desired_set = set(desired5)
         if desired_set != current_set:
+            before = list(on_court)
             _set_on_court(game_state, team, home, list(desired5))
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
                 if pid not in current_set:
                     last_in[str(pid)] = int(now)
+            after = list(_get_on_court(game_state, team, home))
+            try:
+                _emit_substitution(
+                    game_state=game_state, rules=rules, home=home, team=team,
+                    pos_start=pos_start, reason="FOUL_OUT",
+                    before_on=before, after_on=after
+                )
+            except Exception:
+                pass
             return True
 
     # -------------------------
@@ -989,19 +1074,29 @@ def maybe_substitute_deadball_v1(
         )
         desired_set = set(desired5)
         if desired_set != current_set:
+            before = list(on_court)
             _set_on_court(game_state, team, home, list(desired5))
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
                 if pid not in current_set:
                     last_in[str(pid)] = int(now)
+            after = list(_get_on_court(game_state, team, home))
+            try:
+                _emit_substitution(
+                    game_state=game_state, rules=rules, home=home, team=team,
+                    pos_start=pos_start, reason="FATIGUE_EMERGENCY",
+                    before_on=before, after_on=after
+                )
+            except Exception:
+                pass
             return True
 
     # -------------------------
     # 3) Planned substitution (checkpoint only)
     # -------------------------
     # Planned subs are only evaluated at checkpoints (with catch-up) and are blocked by cooldown.
-    planned_due = _rotation_checkpoint_due_and_mark(game_state, rules, team_key_str=key)
+    planned_due = _rotation_checkpoint_due_and_mark(game_state, rules, team_key_str=str(key))
     if not planned_due:
         return False
 
@@ -1138,6 +1233,7 @@ def maybe_substitute_deadball_v1(
 
     # Apply + update trackers
     prev_set = set(on_court)
+    before = list(on_court)
     _set_on_court(game_state, team, home, list(new_on_court)[:5])
     game_state.rotation_last_sub_game_sec[key] = int(now)
 
@@ -1146,5 +1242,13 @@ def maybe_substitute_deadball_v1(
         if pid not in prev_set:
             last_in[str(pid)] = int(now)
 
+    after = list(_get_on_court(game_state, team, home))
+    try:
+        _emit_substitution(
+            game_state=game_state, rules=rules, home=home, team=team,
+            pos_start=pos_start, reason="PLANNED",
+            before_on=before, after_on=after
+        )
+    except Exception:
+        pass
     return True
-

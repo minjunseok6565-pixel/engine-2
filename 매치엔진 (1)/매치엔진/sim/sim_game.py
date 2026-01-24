@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, List
 
 from .core import ENGINE_VERSION, make_replay_token, clamp
 from .models import GameState, TeamState
+from .replay import emit_event
 from .validation import (
     ValidationConfig,
     ValidationReport,
@@ -33,6 +34,65 @@ from .sim_timeout import ensure_timeout_state, maybe_timeout_deadball, update_ti
 from .team_keys import AWAY, HOME, team_key
 from .sim_possession import simulate_possession
 
+
+# -------------------------
+# Side-key adapter for team-id keyed state dicts
+# -------------------------
+class SideKeyedDict(dict):
+    """dict that stores values by team_id but allows HOME/AWAY side-key access.
+
+    This lets the engine keep using side keys ('home'/'away') in internal logic while
+    keeping GameState's team-scoped state keyed by stable team_id strings.
+    """
+
+    def __init__(self, side_to_team_id: Dict[str, str], initial: Optional[Dict[Any, Any]] = None, **kwargs: Any):
+        super().__init__()
+        self._side_to_team_id = dict(side_to_team_id or {})
+        if initial:
+            self.update(initial)
+        if kwargs:
+            self.update(kwargs)
+
+    def _k(self, key: Any) -> Any:
+        try:
+            return self._side_to_team_id.get(str(key), key)
+        except Exception:
+            return key
+
+    def __getitem__(self, key: Any) -> Any:
+        return super().__getitem__(self._k(key))
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        super().__setitem__(self._k(key), value)
+
+    def __delitem__(self, key: Any) -> None:
+        super().__delitem__(self._k(key))
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            return super().__contains__(self._k(key))  # type: ignore[arg-type]
+        except Exception:
+            return super().__contains__(key)  # type: ignore[arg-type]
+
+    def get(self, key: Any, default: Any = None) -> Any:  # noqa: A003 (shadow built-in)
+        return super().get(self._k(key), default)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        return super().setdefault(self._k(key), default)
+
+    def pop(self, key: Any, default: Any = None) -> Any:  # noqa: A003 (shadow built-in)
+        return super().pop(self._k(key), default)
+
+    def update(self, other: Optional[Dict[Any, Any]] = None, /, **kwargs: Any) -> None:  # type: ignore[override]
+        if other:
+            if hasattr(other, "items"):
+                for k, v in other.items():  # type: ignore[union-attr]
+                    super().__setitem__(self._k(k), v)
+            else:
+                for k, v in other:  # type: ignore[assignment]
+                    super().__setitem__(self._k(k), v)
+        for k, v in kwargs.items():
+            super().__setitem__(self._k(k), v)
 # -------------------------
 # Rotation plan helpers
 # -------------------------
@@ -304,31 +364,72 @@ def simulate_game(
     start_away = [p.pid for p in away.lineup[:5]]
     start_home = _enforce_initiator_primary_start(home, start_home, targets_home, rules)
     start_away = _enforce_initiator_primary_start(away, start_away, targets_away, rules)
+
+    # Stable team identifiers for this game (used for all team-keyed state and replay events).
+    home_team_id = str(getattr(home, "team_id", None) or home.name)
+    away_team_id = str(getattr(away, "team_id", None) or away.name)
+    side_to_team_id = {HOME: home_team_id, AWAY: away_team_id}
+    team_id_to_side = {home_team_id: HOME, away_team_id: AWAY}
+
+    # Timeout defaults (ensure_timeout_state is still called for safety, but we seed non-empty
+    # team_id-keyed dicts so side-key logic can translate without creating legacy side-key entries).
+    to_rules = rules.get("timeouts", {}) if isinstance(rules, dict) else {}
+    per_team_timeouts = int(to_rules.get("per_team", 7))
+
     game_state = GameState(
         quarter=1,
-        clock_sec=0,
-        shot_clock_sec=0,
+        clock_sec=0.0,
+        shot_clock_sec=0.0,
         score_home=home.pts,
         score_away=away.pts,
         possession=0,
-        team_fouls={HOME: 0, AWAY: 0},
-        player_fouls={HOME: {}, AWAY: {}},
-        fatigue={
-            HOME: {p.pid: 1.0 for p in home.lineup},
-            AWAY: {p.pid: 1.0 for p in away.lineup},
-        },
-        minutes_played_sec={
-            HOME: {p.pid: 0.0 for p in home.lineup},
-            AWAY: {p.pid: 0.0 for p in away.lineup},
-        },
+        # Team mapping is fixed for the whole game.
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        side_to_team_id=side_to_team_id,
+        team_id_to_side=team_id_to_side,
+        # Team-scoped state is stored by team_id, but legacy side-key access is supported via SideKeyedDict.
+        team_fouls=SideKeyedDict(side_to_team_id, {home_team_id: 0, away_team_id: 0}),
+        player_fouls=SideKeyedDict(side_to_team_id, {home_team_id: {}, away_team_id: {}}),
+        fatigue=SideKeyedDict(
+            side_to_team_id,
+            {
+                home_team_id: {p.pid: 1.0 for p in home.lineup},
+                away_team_id: {p.pid: 1.0 for p in away.lineup},
+            },
+        ),
+        minutes_played_sec=SideKeyedDict(
+            side_to_team_id,
+            {
+                home_team_id: {p.pid: 0.0 for p in home.lineup},
+                away_team_id: {p.pid: 0.0 for p in away.lineup},
+            },
+        ),
+        # Timeout / flow trackers (state, not logs)
+        timeouts_remaining=SideKeyedDict(
+            side_to_team_id,
+            {home_team_id: per_team_timeouts, away_team_id: per_team_timeouts},
+        ),
+        timeouts_used=SideKeyedDict(side_to_team_id, {home_team_id: 0, away_team_id: 0}),
+        timeout_last_possession=SideKeyedDict(
+            side_to_team_id,
+            {home_team_id: -999999, away_team_id: -999999},
+        ),
+        run_pts_by_scoring_side=SideKeyedDict(side_to_team_id, {home_team_id: 0, away_team_id: 0}),
+        consecutive_team_tos=SideKeyedDict(side_to_team_id, {home_team_id: 0, away_team_id: 0}),
+        # Rotation v1.0 state (initialized below; keep dicts as SideKeyedDict to avoid side-key leakage).
+        rotation_last_sub_game_sec=SideKeyedDict(side_to_team_id, {}),
+        rotation_last_in_game_sec=SideKeyedDict(side_to_team_id, {}),
+        rotation_checkpoint_mask=SideKeyedDict(side_to_team_id, {}),
+        rotation_checkpoint_quarter=SideKeyedDict(side_to_team_id, {}),
         on_court_home=list(start_home),
         on_court_away=list(start_away),
         targets_sec_home=targets_home,
         targets_sec_away=targets_away,
     )
-    ensure_rotation_v1_state(game_state, home, away, rules)
     # Initialize timeout state + flow trackers (safe no-ops if rules disable it)
     ensure_timeout_state(game_state, rules)
+    ensure_rotation_v1_state(game_state, home, away, rules)
     home.set_on_court(start_home)
     away.set_on_court(start_away)
 
@@ -344,9 +445,7 @@ def simulate_game(
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
     DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob")
 
-    # Team side keys used by timeout/rotation trackers and debug helpers.
-    home_team_id = HOME
-    away_team_id = AWAY
+    # Team IDs are fixed for this game (already computed above).
 
     def _maybe_open_sub_window_deadball(
         q_index: int,
@@ -399,8 +498,8 @@ def simulate_game(
         nonlocal total_possessions, replay_token
         game_state.quarter = q + 1
         game_state.clock_sec = float(period_length_sec)
-        game_state.team_fouls[HOME] = 0
-        game_state.team_fouls[AWAY] = 0
+        game_state.team_fouls[home_team_id] = 0
+        game_state.team_fouls[away_team_id] = 0
 
         # Period start possession:
         # - Regulation: alternate (A starts Q1/Q3, B starts Q2/Q4)
@@ -412,6 +511,15 @@ def simulate_game(
 
         defense = away if offense is home else home
         pos_start = "start_q"
+
+        # Replay event: period start (neutral)
+        try:
+            game_state.score_home = int(home.pts)
+            game_state.score_away = int(away.pts)
+            game_state.possession = total_possessions
+            emit_event(game_state, home, away, rules, "PERIOD_START", pos_start="start_q")
+        except Exception:
+            pass
 
         # Possession-continuation state: some dead-ball events (e.g. no-shot foul) can stop play
         # and restart with the same offense. In those cases we re-enter the loop without counting
@@ -686,6 +794,23 @@ def simulate_game(
             #   sim_possession applied (ORB reset, special cases, etc).
             # Do NOT reset shot clock here based on pos_start; it causes future continuation types
             # (e.g., after_block_oob) to be accidentally overwritten.
+            # Replay event: possession start (only once per possession; not for continuation segments)
+            if not pos_is_continuation:
+                try:
+                    game_state.score_home = int(home.pts)
+                    game_state.score_away = int(away.pts)
+                    emit_event(
+                        game_state,
+                        home,
+                        away,
+                        rules,
+                        "POSSESSION_START",
+                        team_side=str(off_key),
+                        pos_start=str(pos_start),
+                    )
+                except Exception:
+                    pass
+
             pos_res = simulate_possession(rng, offense, defense, game_state, rules, ctx, game_cfg=game_cfg)
             pos_errors = ctx.get("errors") if isinstance(ctx, dict) else None
             if isinstance(pos_errors, list) and pos_errors:
@@ -734,6 +859,38 @@ def simulate_game(
                 pos_start = str(pos_res.get("pos_start_next", "after_foul"))
                 continue
 
+            # Replay event: possession end (terminal only; DEADBALL_STOP is a continuation and is not an end)
+            try:
+                game_state.score_home = int(home.pts)
+                game_state.score_away = int(away.pts)
+                emit_event(
+                    game_state,
+                    home,
+                    away,
+                    rules,
+                    "POSSESSION_END",
+                    team_side=str(off_key),
+                    end_reason=pos_res.get("end_reason"),
+                    points_scored=pos_res.get("points_scored"),
+                    had_orb=pos_res.get("had_orb"),
+                    first_fga_shotclock_sec=pos_res.get("first_fga_shotclock_sec"),
+                    deadball_reason=pos_res.get("deadball_reason"),
+                    ended_with_ft_trip=pos_res.get("ended_with_ft_trip"),
+                    turnover_outcome=pos_res.get("turnover_outcome"),
+                    turnover_is_steal=pos_res.get("turnover_is_steal"),
+                    turnover_stealer_pid=pos_res.get("turnover_stealer_pid"),
+                    turnover_deadball=pos_res.get("turnover_deadball"),
+                    turnover_deadball_reason=pos_res.get("turnover_deadball_reason"),
+                    was_blocked=pos_res.get("was_blocked"),
+                    blocker_pid=pos_res.get("blocker_pid"),
+                    block_kind=pos_res.get("block_kind"),
+                    pos_start=pos_res.get("pos_start"),
+                    pos_start_next=pos_res.get("pos_start_next"),
+                    pos_start_next_override=pos_res.get("pos_start_next_override"),
+                )
+            except Exception:
+                pass
+
             pts_scored = int(pos_res.get("points_scored", 0))
             had_orb = bool(pos_res.get("had_orb", False))
             pos_start_val = str(pos_res.get("pos_start", ""))
@@ -778,6 +935,14 @@ def simulate_game(
             # event-based possession change: after any terminal end, ball goes to defense
             offense, defense = defense, offense
             pos_start = str(pos_res.get("pos_start_next", "after_tov"))
+
+        # Replay event: period end (neutral)
+        try:
+            game_state.score_home = int(home.pts)
+            game_state.score_away = int(away.pts)
+            emit_event(game_state, home, away, rules, "PERIOD_END")
+        except Exception:
+            pass
 
         replay_token = make_replay_token(rng, home, away, era=era)
 
@@ -831,20 +996,27 @@ def simulate_game(
                     "bad_by_grade": {home.name: home.role_fit_bad_by_grade, away.name: away.role_fit_bad_by_grade},
                 },
                 "timeouts": {
-                    "remaining": _side_to_team_keyed(dict(getattr(game_state, "timeouts_remaining", {})), home_team_id, away_team_id),
-                    "used": _side_to_team_keyed(dict(getattr(game_state, "timeouts_used", {})), home_team_id, away_team_id),
-                    "run_pts_by_scoring_side": _side_to_team_keyed(dict(getattr(game_state, "run_pts_by_scoring_side", {})), home_team_id, away_team_id),
-                    "consecutive_team_tos": _side_to_team_keyed(dict(getattr(game_state, "consecutive_team_tos", {})), home_team_id, away_team_id),
-                    "log": list(getattr(game_state, "timeout_log", []) or []),
+                    "remaining": dict(getattr(game_state, "timeouts_remaining", {}) or {}),
+                    "used": dict(getattr(game_state, "timeouts_used", {}) or {}),
+                    "run_pts_by_scoring_side": dict(getattr(game_state, "run_pts_by_scoring_side", {}) or {}),
+                    "consecutive_team_tos": dict(getattr(game_state, "consecutive_team_tos", {}) or {}),
+                    "last_scoring_side": getattr(game_state, "last_scoring_side", None),
                 },
             },
         },
+        "replay_events": list(getattr(game_state, "replay_events", []) or []),
         "possessions_per_team": max(home.possessions, away.possessions),
         "teams": {
             home.name: summarize_team(home, game_state, home=home),
             away.name: summarize_team(away, game_state, home=home),
         },
         "game_state": {
+            "quarter": game_state.quarter,
+            "clock_sec": game_state.clock_sec,
+            "shot_clock_sec": game_state.shot_clock_sec,
+            "score_home": game_state.score_home,
+            "score_away": game_state.score_away,
+            "possession": game_state.possession,
             "team_fouls": dict(game_state.team_fouls),
             "player_fouls": dict(game_state.player_fouls),
             "fatigue": dict(game_state.fatigue),

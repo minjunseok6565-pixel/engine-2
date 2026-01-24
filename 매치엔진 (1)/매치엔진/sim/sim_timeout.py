@@ -5,9 +5,46 @@ from typing import Any, Dict, Optional, Tuple
 
 from .core import clamp
 from .team_keys import HOME, AWAY
+from .replay import emit_event
 
 
 _DEADBALL_STARTS = {"start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"}
+
+
+def _team_key(game_state: Any, side_or_team_id: str) -> str:
+    """
+    Convert HOME/AWAY side to stable team_id using game_state.side_to_team_id.
+    If mapping is unavailable, returns the input key (legacy/standalone-safe).
+    """
+    try:
+        st = getattr(game_state, "side_to_team_id", None)
+        if isinstance(st, dict):
+            k = st.get(str(side_or_team_id))
+            if k:
+                return str(k)
+    except Exception:
+        pass
+    return str(side_or_team_id)
+
+
+def _migrate_side_keys_to_team_ids(d: Any, game_state: Any) -> None:
+    """
+    If a dict still contains legacy "home"/"away" keys after team mapping exists,
+    migrate values into team_id keys and delete the legacy keys to prevent duplicates.
+    """
+    if not isinstance(d, dict):
+        return
+    try:
+        hk = _team_key(game_state, HOME)
+        ak = _team_key(game_state, AWAY)
+        if HOME in d and hk != HOME:
+            d.setdefault(hk, d.get(HOME))
+            del d[HOME]
+        if AWAY in d and ak != AWAY:
+            d.setdefault(ak, d.get(AWAY))
+            del d[AWAY]
+    except Exception:
+        return
 
 
 def ensure_timeout_state(game_state: Any, rules: Dict[str, Any]) -> None:
@@ -15,38 +52,43 @@ def ensure_timeout_state(game_state: Any, rules: Dict[str, Any]) -> None:
     to_rules = rules.get("timeouts", {}) if isinstance(rules, dict) else {}
     per_team = int(to_rules.get("per_team", 7))
 
-    if not isinstance(getattr(game_state, "timeouts_remaining", None), dict) or not game_state.timeouts_remaining:
-        game_state.timeouts_remaining = {HOME: per_team, AWAY: per_team}
-    else:
-        game_state.timeouts_remaining.setdefault(HOME, per_team)
-        game_state.timeouts_remaining.setdefault(AWAY, per_team)
+    hk = _team_key(game_state, HOME)
+    ak = _team_key(game_state, AWAY)
 
-    if not isinstance(getattr(game_state, "timeouts_used", None), dict) or not game_state.timeouts_used:
-        game_state.timeouts_used = {HOME: 0, AWAY: 0}
+    if not isinstance(getattr(game_state, "timeouts_remaining", None), dict) or not getattr(game_state, "timeouts_remaining", None):
+        game_state.timeouts_remaining = {hk: per_team, ak: per_team}
     else:
-        game_state.timeouts_used.setdefault(HOME, 0)
-        game_state.timeouts_used.setdefault(AWAY, 0)
+        _migrate_side_keys_to_team_ids(game_state.timeouts_remaining, game_state)
+        game_state.timeouts_remaining.setdefault(hk, per_team)
+        game_state.timeouts_remaining.setdefault(ak, per_team)
 
-    if not isinstance(getattr(game_state, "timeout_last_possession", None), dict) or not game_state.timeout_last_possession:
-        game_state.timeout_last_possession = {HOME: -999999, AWAY: -999999}
+    if not isinstance(getattr(game_state, "timeouts_used", None), dict) or not getattr(game_state, "timeouts_used", None):
+        game_state.timeouts_used = {hk: 0, ak: 0}
     else:
-        game_state.timeout_last_possession.setdefault(HOME, -999999)
-        game_state.timeout_last_possession.setdefault(AWAY, -999999)
+        _migrate_side_keys_to_team_ids(game_state.timeouts_used, game_state)
+        game_state.timeouts_used.setdefault(hk, 0)
+        game_state.timeouts_used.setdefault(ak, 0)
 
-    if not isinstance(getattr(game_state, "timeout_log", None), list):
-        game_state.timeout_log = []
-
-    if not isinstance(getattr(game_state, "run_pts_by_scoring_side", None), dict) or not game_state.run_pts_by_scoring_side:
-        game_state.run_pts_by_scoring_side = {HOME: 0, AWAY: 0}
+    if not isinstance(getattr(game_state, "timeout_last_possession", None), dict) or not getattr(game_state, "timeout_last_possession", None):
+        game_state.timeout_last_possession = {hk: -999999, ak: -999999}
     else:
-        game_state.run_pts_by_scoring_side.setdefault(HOME, 0)
-        game_state.run_pts_by_scoring_side.setdefault(AWAY, 0)
+        _migrate_side_keys_to_team_ids(game_state.timeout_last_possession, game_state)
+        game_state.timeout_last_possession.setdefault(hk, -999999)
+        game_state.timeout_last_possession.setdefault(ak, -999999)
 
-    if not isinstance(getattr(game_state, "consecutive_team_tos", None), dict) or not game_state.consecutive_team_tos:
-        game_state.consecutive_team_tos = {HOME: 0, AWAY: 0}
+    if not isinstance(getattr(game_state, "run_pts_by_scoring_side", None), dict) or not getattr(game_state, "run_pts_by_scoring_side", None):
+        game_state.run_pts_by_scoring_side = {hk: 0, ak: 0}
     else:
-        game_state.consecutive_team_tos.setdefault(HOME, 0)
-        game_state.consecutive_team_tos.setdefault(AWAY, 0)
+        _migrate_side_keys_to_team_ids(game_state.run_pts_by_scoring_side, game_state)
+        game_state.run_pts_by_scoring_side.setdefault(hk, 0)
+        game_state.run_pts_by_scoring_side.setdefault(ak, 0)
+
+    if not isinstance(getattr(game_state, "consecutive_team_tos", None), dict) or not getattr(game_state, "consecutive_team_tos", None):
+        game_state.consecutive_team_tos = {hk: 0, ak: 0}
+    else:
+        _migrate_side_keys_to_team_ids(game_state.consecutive_team_tos, game_state)
+        game_state.consecutive_team_tos.setdefault(hk, 0)
+        game_state.consecutive_team_tos.setdefault(ak, 0)
 
     # last_scoring_side is optional; leave as-is if already present
 
@@ -68,6 +110,7 @@ def update_timeout_trackers(game_state: Any, offense_side: str, pos_res: Dict[st
     side = str(offense_side)
     if side not in (HOME, AWAY):
         return
+    side_k = _team_key(game_state, side)
 
     # Points scored (assumes offense is the scoring side when points_scored > 0)
     pts = int(pos_res.get("points_scored", 0) or 0)
@@ -75,19 +118,20 @@ def update_timeout_trackers(game_state: Any, offense_side: str, pos_res: Dict[st
         scoring_side = side
         last = getattr(game_state, "last_scoring_side", None)
         if last == scoring_side:
-            game_state.run_pts_by_scoring_side[scoring_side] = int(game_state.run_pts_by_scoring_side.get(scoring_side, 0)) + pts
+            game_state.run_pts_by_scoring_side[side_k] = int(game_state.run_pts_by_scoring_side.get(side_k, 0)) + pts
         else:
             other = AWAY if scoring_side == HOME else HOME
-            game_state.run_pts_by_scoring_side[scoring_side] = pts
-            game_state.run_pts_by_scoring_side[other] = 0
+            other_k = _team_key(game_state, other)
+            game_state.run_pts_by_scoring_side[side_k] = pts
+            game_state.run_pts_by_scoring_side[other_k] = 0
             game_state.last_scoring_side = scoring_side
 
     # Consecutive turnovers (team possessions)
     if end_reason in ("TURNOVER", "SHOTCLOCK"):
-        game_state.consecutive_team_tos[side] = int(game_state.consecutive_team_tos.get(side, 0)) + 1
+        game_state.consecutive_team_tos[side_k] = int(game_state.consecutive_team_tos.get(side_k, 0)) + 1
     else:
         # any non-turnover possession by that team breaks its TO streak
-        game_state.consecutive_team_tos[side] = 0
+        game_state.consecutive_team_tos[side_k] = 0
 
 
 def maybe_timeout_deadball(
@@ -99,10 +143,18 @@ def maybe_timeout_deadball(
     pressure_index: float,
     avg_energy_home: float,
     avg_energy_away: float,
+    # Back-compat: prior callsites passed these strings; we now prefer game_state mapping.
     home_team_id: Optional[str] = None,
     away_team_id: Optional[str] = None,
+    # Preferred: pass actual TeamState objects so TIMEOUT can be logged into replay_events.
+    home: Any = None,
+    away: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """Attempt a dead-ball timeout (v1). Returns event dict if fired, else None."""
+    """Attempt a dead-ball timeout (v1). Returns replay_event dict if fired, else None.
+
+    IMPORTANT: 기록(Source of Truth)은 replay_events 하나로 통일한다.
+    TIMEOUT은 emit_event(...)로만 1회 기록하며, 별도 timeout_log는 유지하지 않는다.
+    """
     if not isinstance(rules, dict):
         return None
 
@@ -128,10 +180,11 @@ def maybe_timeout_deadball(
     for side in cand_sides:
         if side not in (HOME, AWAY):
             continue
-        remaining = int(game_state.timeouts_remaining.get(side, per_team))
+        side_k = _team_key(game_state, side)
+        remaining = int(game_state.timeouts_remaining.get(side_k, per_team))
         if remaining <= 0:
             continue
-        last_pos = int(game_state.timeout_last_possession.get(side, -999999))
+        last_pos = int(game_state.timeout_last_possession.get(side_k, -999999))
         if poss_idx - last_pos < cooldown:
             continue
 
@@ -176,27 +229,48 @@ def maybe_timeout_deadball(
     side, p, reason = chosen
 
     # Consume timeout
-    game_state.timeouts_remaining[side] = int(game_state.timeouts_remaining.get(side, per_team)) - 1
-    game_state.timeouts_used[side] = int(game_state.timeouts_used.get(side, 0)) + 1
-    game_state.timeout_last_possession[side] = poss_idx
+    side_k = _team_key(game_state, side)
+    game_state.timeouts_remaining[side_k] = int(game_state.timeouts_remaining.get(side_k, per_team)) - 1
+    game_state.timeouts_used[side_k] = int(game_state.timeouts_used.get(side_k, 0)) + 1
+    game_state.timeout_last_possession[side_k] = poss_idx
 
-    team_id = (home_team_id if side == HOME else away_team_id) if (home_team_id or away_team_id) else None
+    # Ensure we have home/away objects for emit_event. If the caller didn't pass TeamState,
+    # build minimal stubs from game_state + mapping (keeps logging centralized without duplicating state).
+    if home is None or away is None:
+        class _TeamStub:
+            def __init__(self, name: str, pts: int):
+                self.name = name
+                self.team_id = name
+                self.pts = int(pts)
 
-    event = {
-        "event_type": "TIMEOUT",
-        "by_side": side,
-        "by_team_id": team_id,
-        "quarter": int(getattr(game_state, "quarter", 0) or 0),
-        "clock_sec": float(getattr(game_state, "clock_sec", 0.0) or 0.0),
-        "shot_clock_sec": float(getattr(game_state, "shot_clock_sec", 0.0) or 0.0),
-        "pos_start": str(pos_start),
-        "possession_index": poss_idx,
-        "reason": str(reason),
-        "timeouts_remaining_after": int(game_state.timeouts_remaining.get(side, 0)),
-        "p": float(p),
-    }
+        hid = str(getattr(game_state, "home_team_id", None) or home_team_id or "")
+        aid = str(getattr(game_state, "away_team_id", None) or away_team_id or "")
+        if not hid:
+            hid = str(home_team_id or "HOME")
+        if not aid:
+            aid = str(away_team_id or "AWAY")
+        home = _TeamStub(hid, int(getattr(game_state, "score_home", 0) or 0))
+        away = _TeamStub(aid, int(getattr(game_state, "score_away", 0) or 0))
 
-    game_state.timeout_log.append(dict(event))
+    # 기록은 replay_events로만 1회 남긴다.
+    event = emit_event(
+        game_state,
+        event_type="TIMEOUT",
+        home=home,
+        away=away,
+        rules=rules,
+        team_side=str(side),
+        pos_start=str(pos_start),
+        reason=str(reason),
+        timeouts_remaining_after=int(game_state.timeouts_remaining.get(side_k, 0)),
+        p=float(p),
+        # Optional snapshots (이미 존재하는 상태값을 이벤트 시점 스냅샷으로 담음)
+        timeouts_remaining=dict(getattr(game_state, "timeouts_remaining", {}) or {}),
+        timeouts_used=dict(getattr(game_state, "timeouts_used", {}) or {}),
+        run_pts_by_scoring_side=dict(getattr(game_state, "run_pts_by_scoring_side", {}) or {}),
+        consecutive_team_tos=dict(getattr(game_state, "consecutive_team_tos", {}) or {}),
+        last_scoring_side=getattr(game_state, "last_scoring_side", None),
+    )
 
     # Recovery (optional; default disabled)
     rec = rules.get("timeout_recovery", {})
@@ -224,7 +298,8 @@ def _compute_timeout_probability(
     opponent = AWAY if side == HOME else HOME
     run_pts = 0
     if getattr(game_state, "last_scoring_side", None) == opponent:
-        run_pts = int((getattr(game_state, "run_pts_by_scoring_side", {}) or {}).get(opponent, 0))
+        opp_k = _team_key(game_state, opponent)
+        run_pts = int((getattr(game_state, "run_pts_by_scoring_side", {}) or {}).get(opp_k, 0))
 
     run_thr = int(ai.get("run_pts_threshold", 8))
     run_hard = int(ai.get("run_pts_hard", max(run_thr + 1, 12)))
@@ -235,7 +310,8 @@ def _compute_timeout_probability(
         p_run_term = p_run * s
 
     # --- Trigger G: ugly streak (same team consecutive turnovers) ---
-    to_streak = int((getattr(game_state, "consecutive_team_tos", {}) or {}).get(side, 0))
+    side_k = _team_key(game_state, side)
+    to_streak = int((getattr(game_state, "consecutive_team_tos", {}) or {}).get(side_k, 0))
     to_thr = int(ai.get("to_streak_threshold", 3))
     to_hard = int(ai.get("to_streak_hard", max(to_thr + 1, 4)))
     p_to = float(ai.get("p_to", 0.0))

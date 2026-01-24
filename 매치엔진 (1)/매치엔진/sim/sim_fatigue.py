@@ -9,6 +9,23 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .models import GameState, TeamState
 from .team_keys import team_key
+from .team_keys import HOME, AWAY
+
+
+def _state_team_key(game_state: GameState, side_or_team_id: str) -> str:
+    """
+    Convert a side key ("home"/"away") into stable team_id using game_state.side_to_team_id.
+    Falls back to input key if mapping is unavailable.
+    """
+    try:
+        st = getattr(game_state, "side_to_team_id", None)
+        if isinstance(st, dict):
+            v = st.get(str(side_or_team_id))
+            if v:
+                return str(v)
+    except Exception:
+        pass
+    return str(side_or_team_id)
 
 
 # Prefer to reuse the same role->group mapping as sim_rotation (keeps rotation + fatigue consistent).
@@ -176,7 +193,8 @@ def _apply_fatigue_loss(
 
     # --- on-court: 소모 ---
     role_by_pid = _get_offense_role_by_pid(team)
-    key = team_key(team, home)
+    side = str(team_key(team, home))
+    key = _state_team_key(game_state, side)
     fat_map = game_state.fatigue.setdefault(key, {})
 
     for pid in on_court:
@@ -236,7 +254,8 @@ def _apply_break_recovery(
     br = rules.get("break_recovery", {}) or {}
     on_per_sec = float(br.get("on_court_per_sec", 0.0010))
     bench_per_sec = float(br.get("bench_per_sec", 0.0016))
-    key = team_key(team, home)
+    side = str(team_key(team, home))
+    key = _state_team_key(game_state, side)
     fat_map = game_state.fatigue.setdefault(key, {})
 
     # on-court players recover
