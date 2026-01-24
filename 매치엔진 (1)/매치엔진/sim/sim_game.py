@@ -7,7 +7,7 @@ NOTE: Split from sim.py on 2025-12-27.
 
 import random
 import math
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Tuple
 
 from .core import ENGINE_VERSION, make_replay_token, clamp
 from .models import GameState, TeamState
@@ -375,10 +375,17 @@ def simulate_game(
     # Initialize timeout state + flow trackers (safe no-ops if rules disable it)
     ensure_timeout_state(game_state, rules)
     ensure_rotation_v1_state(game_state, home, away, rules)
-    home.set_on_court(start_home)
-    away.set_on_court(start_away)
+
+    # Seed lineup versions for deterministic replay seeking (Q1 tip-off snapshot uses these).
+    game_state.lineup_version = 1
+    game_state.lineup_version_by_team_id = {home_team_id: 1, away_team_id: 1}
+
+    # Ensure TeamState on-court matches GameState without bumping lineup versions.
+    _set_on_court(game_state, home, home, list(start_home), bump_version=False)
+    _set_on_court(game_state, away, home, list(start_away), bump_version=False)
 
     regulation_quarters = int(rules.get("quarters", 4))
+    quarter_length_sec = float(rules.get("quarter_length", 720))
     overtime_length = float(rules.get("overtime_length", 300))
     total_possessions = 0
     overtime_periods = 0
@@ -409,6 +416,31 @@ def simulate_game(
     # NOTE: start_q is treated as a dead-ball window ONLY for Q2+ (and OT),
     # not for the opening tip (Q1 start), to avoid subbing starters before any play.
     DEADBALL_SUB_STARTS = ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob")
+
+    # Replay event: game start (Q1 tip-off state / starting lineups).
+    # This guarantees the consumer can reconstruct on-court players at 12:00 even if they jump into the middle.
+    try:
+        game_state.quarter = 1
+        game_state.clock_sec = float(quarter_length_sec)
+        game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+        game_state.score_home = int(home.pts)
+        game_state.score_away = int(away.pts)
+        game_state.possession = 0
+        emit_event(
+            game_state,
+            event_type="GAME_START",
+            home=home,
+            away=away,
+            rules=rules,
+            include_lineups=True,
+            pos_start="start_game",
+        )
+    except Exception as e:
+        _push_debug_error(
+            "replay.emit_event.GAME_START",
+            e,
+            {"event_type": "GAME_START", "q_index": 0, "pos_start": "start_game"},
+        )
 
     # Team IDs are fixed for this game (already computed above).
 
@@ -485,58 +517,17 @@ def simulate_game(
         defense = away if offense is home else home
         pos_start = "start_q"
 
-        # Replay event: period start (neutral)
-        try:
-            game_state.score_home = int(home.pts)
-            game_state.score_away = int(away.pts)
-            game_state.possession = total_possessions
-            emit_event(
-                game_state,
-                event_type="PERIOD_START",
-                home=home,
-                away=away,
-                rules=rules,
-                pos_start="start_q",
-            )
-        except Exception as e:
-            _push_debug_error(
-                "replay.emit_event.PERIOD_START",
-                e,
-                {"event_type": "PERIOD_START", "q_index": int(q), "pos_start": "start_q"},
-            )
+        start_q_deadball_handled = False
 
-        # Possession-continuation state: some dead-ball events (e.g. no-shot foul) can stop play
-        # and restart with the same offense. In those cases we re-enter the loop without counting
-        # a new possession, and we must preserve possession-scope aggregates.
-        pos_is_continuation = False
-        pos_before_pts = 0
-        pos_had_orb = False
-        pos_origin_start = ""
-        pos_first_fga_sc = None
-
-
-        while game_state.clock_sec > 0:
-            game_state.possession = total_possessions
-
-            # For continuation segments (e.g. after a no-shot foul), preserve the current
-            # shot clock value (the foul-stop logic may have applied a 14s reset already).
-            if not pos_is_continuation:
-                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
-                
-            start_clock = game_state.clock_sec
-
-            # Initialize possession-scope aggregates only once per possession.
-            if not pos_is_continuation:
-                pos_before_pts = int(offense.pts)
-                pos_had_orb = False
-                pos_origin_start = str(pos_start)
-                pos_first_fga_sc = None
-
-            # Game context that does NOT depend on the on-court lineup.
+        def _compute_phase_indices() -> Tuple[int, float, float]:
+            """
+            Compute + update smoothed game-phase indices based on current clock/score:
+              - pressure_index (clutch pressure; EMA-smoothed)
+              - garbage_index (garbage time; EMA-smoothed)
+            Also updates:
+              - dominant_mode, clutch_level, garbage_level
+            """
             score_diff = home.pts - away.pts
-            # Continuous late-game indices (v1.0):
-            # - pressure_index: clutch pressure (0..1), smoothed via EMA
-            # - garbage_index: garbage time (0..1), smoothed via EMA (regulation 4Q only; OT is forced 0)
             poss_diff = abs(float(score_diff)) / 3.0  # 3 points ~= 1 possession
 
             pressure_raw = 0.0
@@ -596,6 +587,126 @@ def simulate_game(
                 garbage_level = "MID"
             game_state.garbage_level = garbage_level
 
+            return int(score_diff), float(pressure_index), float(garbage_index)
+
+        # ------------------------------------------------------------
+        # START-OF-PERIOD DEAD-BALL (RUN ONCE, BEFORE PERIOD_START LOG)
+        # ------------------------------------------------------------
+        # We run the start_q dead-ball window BEFORE emitting PERIOD_START so that
+        # PERIOD_START (with include_lineups=True) reflects the FINAL on-court five
+        # after between-quarters substitutions / timeout recovery.
+        #
+        # IMPORTANT: Q1 opening tip is excluded from dead-ball (timeouts + subs),
+        # consistent with the engine note for starters (no pre-tip adjustments).
+        game_state.score_home = int(home.pts)
+        game_state.score_away = int(away.pts)
+        game_state.possession = total_possessions
+        game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+
+        score_diff, pressure_index, garbage_index = _compute_phase_indices()
+        variance_mult = 1.0
+        tempo_mult = 1.0
+
+        timeout_evt = None
+        opening_tip = (q == 0 and total_possessions == 0)
+        if not opening_tip:
+            # --- Dead-ball timeout phase (v1) ---
+            try:
+                next_offense_side = str(team_key(offense, home))
+                home_on = list(game_state.on_court_home or [])
+                away_on = list(game_state.on_court_away or [])
+                home_fmap = game_state.fatigue.get(HOME, {}) if isinstance(game_state.fatigue, dict) else {}
+                away_fmap = game_state.fatigue.get(AWAY, {}) if isinstance(game_state.fatigue, dict) else {}
+                avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
+                avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
+                timeout_evt = maybe_timeout_deadball(
+                    rng,
+                    game_state,
+                    rules,
+                    pos_start=str(pos_start),
+                    next_offense_side=next_offense_side,
+                    pressure_index=float(pressure_index),
+                    avg_energy_home=float(avg_energy_home),
+                    avg_energy_away=float(avg_energy_away),
+                    home_team_id=home_team_id,
+                    away_team_id=away_team_id,
+                )
+                rec = rules.get("timeout_recovery", {})
+                if timeout_evt and isinstance(rec, dict) and bool(rec.get("enabled", False)):
+                    break_sec = float(rec.get("equiv_break_sec", 12.0))
+                    if break_sec > 0:
+                        _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
+                        _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
+            except Exception as e:
+                _push_debug_error(
+                    "timeout.deadball_phase.start_q_pre_period_start",
+                    e,
+                    {
+                        "pos_start": str(pos_start),
+                        "next_offense_side": str(team_key(offense, home)),
+                        "q_index": int(q),
+                    },
+                )
+
+            # --- Substitution window (dead-ball only) ---
+            _maybe_open_sub_window_deadball(
+                q_index=q,
+                pos_start=str(pos_start),
+                pressure_index=float(pressure_index),
+                garbage_index=float(garbage_index),
+                timeout_evt=timeout_evt if isinstance(timeout_evt, dict) else None,
+            )
+
+        start_q_deadball_handled = True
+
+        # Replay event: period start (neutral) - snapshot FINAL on-court after start_q dead-ball.
+        try:
+            emit_event(
+                game_state,
+                event_type="PERIOD_START",
+                home=home,
+                away=away,
+                rules=rules,
+                include_lineups=True,
+                pos_start="start_q",
+            )
+        except Exception as e:
+            _push_debug_error(
+                "replay.emit_event.PERIOD_START",
+                e,
+                {"event_type": "PERIOD_START", "q_index": int(q), "pos_start": "start_q"},
+            )
+
+        # Possession-continuation state: some dead-ball events (e.g. no-shot foul) can stop play
+        # and restart with the same offense. In those cases we re-enter the loop without counting
+        # a new possession, and we must preserve possession-scope aggregates.
+        pos_is_continuation = False
+        pos_before_pts = 0
+        pos_had_orb = False
+        pos_origin_start = ""
+        pos_first_fga_sc = None
+
+
+        while game_state.clock_sec > 0:
+            game_state.possession = total_possessions
+
+            # For continuation segments (e.g. after a no-shot foul), preserve the current
+            # shot clock value (the foul-stop logic may have applied a 14s reset already).
+            if not pos_is_continuation:
+                game_state.shot_clock_sec = float(rules.get("shot_clock", 24))
+                
+            start_clock = game_state.clock_sec
+
+            # Initialize possession-scope aggregates only once per possession.
+            if not pos_is_continuation:
+                pos_before_pts = int(offense.pts)
+                pos_had_orb = False
+                pos_origin_start = str(pos_start)
+                pos_first_fga_sc = None
+
+            # Game context that does NOT depend on the on-court lineup.
+            score_diff, pressure_index, garbage_index = _compute_phase_indices()
+
             # Legacy knobs: keep neutral for now (new behavior should be driven by indices).
             variance_mult = 1.0
             tempo_mult = 1.0
@@ -605,6 +716,14 @@ def simulate_game(
             # Does not consume game clock and does not affect shot clock (we only log the snapshot).
             # NOTE: we intentionally do NOT change offense/defense here; timeout is a side event.
             timeout_evt = None
+            skip_deadball_phase = bool(
+                start_q_deadball_handled
+                and (not pos_is_continuation)
+                and (str(pos_start) == "start_q")
+            )
+            if skip_deadball_phase:
+                timeout_evt = None
+            else:
             try:
                 next_offense_side = str(team_key(offense, home))
                 home_on = list(game_state.on_court_home or [])
@@ -650,13 +769,14 @@ def simulate_game(
             #   - start_q (between quarters / OT; Q1 opening tip is excluded)
             #
             # This runs AFTER timeout recovery so the rotation/sub logic can see updated energy.
-            _maybe_open_sub_window_deadball(
-                q_index=q,
-                pos_start=str(pos_start),
-                pressure_index=float(pressure_index),
-                garbage_index=float(garbage_index),
-                timeout_evt=timeout_evt if isinstance(timeout_evt, dict) else None,
-            )
+            if not skip_deadball_phase:
+                _maybe_open_sub_window_deadball(
+                    q_index=q,
+                    pos_start=str(pos_start),
+                    pressure_index=float(pressure_index),
+                    garbage_index=float(garbage_index),
+                    timeout_evt=timeout_evt if isinstance(timeout_evt, dict) else None,
+                )
 
             # Now (after potential substitutions), re-read the actual on-court lineups and compute fatigue context.
             off_on_court = _get_on_court(game_state, offense, home)
@@ -972,7 +1092,7 @@ def simulate_game(
 
     # Regulation
     for q in range(regulation_quarters):
-        _play_period(q, float(rules.get("quarter_length", 720)))
+        _play_period(q, float(quarter_length_sec))
 
         # apply break after Q1/Q2/Q3 (not after Q4)
         if q < regulation_quarters - 1:
