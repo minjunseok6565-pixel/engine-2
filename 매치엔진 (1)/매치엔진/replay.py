@@ -20,10 +20,7 @@ _RESERVED_KEYS: Set[str] = {
     "quarter",
     "clock_sec",
     "shot_clock_sec",
-    "clock_ms",
-    "shot_clock_ms",
     "game_elapsed_sec",
-    "game_elapsed_ms",
     "possession_index",
     "score_home",
     "score_away",
@@ -59,6 +56,19 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
     except Exception:
         return float(default)
 
+def _fmt_clock_mmss(clock_sec: Any) -> str:
+    """
+    Format remaining period clock seconds into 'M:SS'.
+    - We floor/truncate toward 0 for display (9:32.9 -> 9:32).
+    - Clamp negative to 0.
+    """
+    sec = _safe_float(clock_sec, 0.0)
+    if sec < 0:
+        sec = 0.0
+    s = int(sec)  # truncate
+    m = s // 60
+    r = s % 60
+    return f"{m}:{r:02d}"
 
 def _compute_game_elapsed_sec(game_state: GameState, rules: Optional[Mapping[str, Any]]) -> int:
     """
@@ -184,9 +194,17 @@ def emit_event(
     poss_idx = possession_index if possession_index is not None else getattr(game_state, "possession", 0)
     poss_idx_i = _safe_int(poss_idx, 0)
 
-    # Score: prefer authoritative TeamState.pts (engine updates these).
-    score_home = _safe_int(getattr(home, "pts", getattr(game_state, "score_home", 0)), 0)
-    score_away = _safe_int(getattr(away, "pts", getattr(game_state, "score_away", 0)), 0)
+    # Score snapshot policy (UX correctness):
+    # - Prefer authoritative TeamState.pts (updated immediately by resolve layer).
+    # - Fallback to GameState mirrors only if TeamState.pts is missing/None.
+    home_pts = getattr(home, "pts", None)
+    away_pts = getattr(away, "pts", None)
+    if home_pts is None:
+        home_pts = getattr(game_state, "score_home", 0)
+    if away_pts is None:
+        away_pts = getattr(game_state, "score_away", 0)
+    score_home = _safe_int(home_pts, 0)
+    score_away = _safe_int(away_pts, 0)
 
     # seq (1..N)
     seq = _safe_int(getattr(game_state, "replay_seq", 0), 0) + 1
@@ -281,12 +299,9 @@ def emit_event(
         "seq": seq,
         "event_type": et,
         "quarter": q,
-        "clock_sec": float(clk),
+        "clock_sec": _fmt_clock_mmss(clk),
         "shot_clock_sec": float(sclk),
-        "clock_ms": int(float(clk) * 1000.0),
-        "shot_clock_ms": int(float(sclk) * 1000.0),
         "game_elapsed_sec": ge_sec,
-        "game_elapsed_ms": int(ge_sec * 1000),
         "possession_index": poss_idx_i,
         "score_home": int(score_home),
         "score_away": int(score_away),
