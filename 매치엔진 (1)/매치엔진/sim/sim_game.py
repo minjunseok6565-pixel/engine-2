@@ -517,7 +517,14 @@ def simulate_game(
             game_state.score_home = int(home.pts)
             game_state.score_away = int(away.pts)
             game_state.possession = total_possessions
-            emit_event(game_state, home, away, rules, "PERIOD_START", pos_start="start_q")
+            emit_event(
+                game_state,
+                event_type="PERIOD_START",
+                home=home,
+                away=away,
+                rules=rules,
+                pos_start="start_q",
+            )
         except Exception:
             pass
 
@@ -801,10 +808,10 @@ def simulate_game(
                     game_state.score_away = int(away.pts)
                     emit_event(
                         game_state,
-                        home,
-                        away,
-                        rules,
-                        "POSSESSION_START",
+                        event_type="POSSESSION_START",
+                        home=home,
+                        away=away,
+                        rules=rules,
                         team_side=str(off_key),
                         pos_start=str(pos_start),
                     )
@@ -865,10 +872,10 @@ def simulate_game(
                 game_state.score_away = int(away.pts)
                 emit_event(
                     game_state,
-                    home,
-                    away,
-                    rules,
-                    "POSSESSION_END",
+                    event_type="POSSESSION_END",
+                    home=home,
+                    away=away,
+                    rules=rules,
                     team_side=str(off_key),
                     end_reason=pos_res.get("end_reason"),
                     points_scored=pos_res.get("points_scored"),
@@ -940,7 +947,13 @@ def simulate_game(
         try:
             game_state.score_home = int(home.pts)
             game_state.score_away = int(away.pts)
-            emit_event(game_state, home, away, rules, "PERIOD_END")
+            emit_event(
+                game_state,
+                event_type="PERIOD_END",
+                home=home,
+                away=away,
+                rules=rules,
+            )
         except Exception:
             pass
 
