@@ -1069,6 +1069,7 @@ def simulate_game(
                 home=home,
                 away=away,
                 rules=rules,
+                include_lineups=True,
             )
         except Exception as e:
             _push_debug_error(
