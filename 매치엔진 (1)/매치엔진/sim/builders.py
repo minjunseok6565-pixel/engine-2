@@ -10,7 +10,7 @@ from .era import get_defense_meta_params
 from .tactics import TacticsConfig
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 
 # -------------------------
@@ -61,11 +61,17 @@ def build_offense_action_probs(
             base[a] = base.get(a, 0.5) * float(m)
 
     context = ctx or {}
-    if context.get("is_clutch"):
-        base["PnR"] = base.get("PnR", 0.5) * 1.05
-        base["Drive"] = base.get("Drive", 0.5) * 1.05
-        base["TransitionEarly"] = base.get("TransitionEarly", 0.5) * 0.90
-
+    # Pressure-driven action mix (continuous 0..1). Replaces legacy boolean clutch flag.
+    # At high pressure: slightly more on-ball creation (PnR/Drive), slightly less early transition.
+    try:
+        p = clamp(float(context.get("pressure_index", 0.0)), 0.0, 1.0)
+    except Exception:
+        p = 0.0
+    if p > 0.0:
+        base["PnR"] = base.get("PnR", 0.5) * (1.0 + 0.05 * p)
+        base["Drive"] = base.get("Drive", 0.5) * (1.0 + 0.05 * p)
+        base["TransitionEarly"] = base.get("TransitionEarly", 0.5) * (1.0 - 0.10 * p)
+        
     # possession-start context tweaks (event-based possession start)
     pos_start = str(context.get("pos_start", ""))
     if pos_start == "after_drb":
@@ -132,25 +138,6 @@ def build_offense_action_probs(
                 probs[act] = max(probs.get(act, 0.0) * mult_by_base.get(base_action, 1.0), 1e-6)
     return normalize_weights(probs)
 
-def build_defense_action_probs(tac: TacticsConfig, game_cfg: Optional["GameConfig"] = None) -> Dict[str, float]:
-    """Build defense 'action' distribution (mostly for logging/feel).
-
-    UI rule (fixed): normalize((Wdef_scheme[action] ^ sharpness) * def_action_mult[action]).
-    """
-    if game_cfg is None:
-        raise ValueError("build_defense_action_probs requires game_cfg")
-    scheme_weights = game_cfg.def_scheme_action_weights if isinstance(game_cfg.def_scheme_action_weights, Mapping) else {}
-    base = dict(
-        scheme_weights.get(
-            tac.defense_scheme,
-            _fallback_scheme(scheme_weights, "Drop"),
-        )
-    )
-    sharp = clamp(tac.def_scheme_weight_sharpness, 0.70, 1.40)
-    base = {a: (max(w, 0.0) ** sharp) for a, w in base.items()}
-    for a, m in tac.def_action_weight_mult.items():
-        base[a] = base.get(a, 0.5) * float(m)
-    return normalize_weights(base)
 
 def effective_scheme_multiplier(base_mult: float, strength: float) -> float:
     s = clamp(strength, 0.70, 1.40)

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 # This file keeps runtime-safe fallbacks so it won't crash if imported standalone.
 if TYPE_CHECKING:
     from typing import Protocol
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
     class Player(Protocol):
         def get(self, key: str) -> Any: ...
@@ -16,11 +16,13 @@ if TYPE_CHECKING:
     class TeamState(Protocol):
         roles: Dict[str, Any]
         tactics: Any
+        on_court_pids: List[str]
         role_fit_pos_log: List[Dict[str, Any]]
         role_fit_grade_counts: Dict[str, int]
         role_fit_role_counts: Dict[str, int]
 
         def find_player(self, pid: Any) -> Optional[Player]: ...
+        def is_on_court(self, pid: str) -> bool: ...
 
 else:
     Player = Any
@@ -151,11 +153,41 @@ def _get_role_fit_strength(offense: TeamState, role_fit_cfg: Optional[Dict[str, 
         return 0.65
 
 
+def _pid_is_on_court(offense: TeamState, pid: Any) -> bool:
+    """
+    role_fit은 '현재 코트 위 5명'을 기준으로만 priors/logit_delta를 보정해야 한다.
+    - offense가 온코트 정보를 제공하면 이를 사용한다.
+    - standalone import 등으로 온코트 정보를 얻을 수 없으면(매우 드묾) 기존 동작을 유지한다.
+    """
+    if not pid:
+        return False
+
+    # 1) 공식 API가 있으면 우선 사용
+    try:
+        if hasattr(offense, "is_on_court"):
+            return bool(offense.is_on_court(str(pid)))
+    except Exception:
+        pass
+
+    # 2) on_court_pids 멤버십 확인
+    try:
+        oc = getattr(offense, "on_court_pids", None)
+        if oc is not None:
+            return (pid in oc) or (str(pid) in oc)
+    except Exception:
+        pass
+
+    # 3) 온코트 정보를 판별할 수 없으면(standalone 환경) 기존 동작 유지
+    return True
+
+
 def _choose_best_role(offense: TeamState, roles: List[str]) -> Optional[Tuple[str, Player, float]]:
     best: Optional[Tuple[str, Player, float]] = None
     for r in roles:
         pid = getattr(offense, "roles", {}).get(r)
         if not pid:
+            continue
+        if not _pid_is_on_court(offense, pid):
             continue
         p = offense.find_player(pid)
         if not p:
@@ -185,14 +217,14 @@ def _collect_roles_for_action_family(action_family: str, offense: TeamState) -> 
         # Roller / Short roll: evaluate both if assigned
         for r in ["Roller_Finisher", "ShortRoll_Playmaker"]:
             pid = offense.roles.get(r)
-            if pid:
+            if pid and _pid_is_on_court(offense, pid):
                 p = offense.find_player(pid)
                 if p:
                     parts.append((r, p, role_fit_score(p, r)))
 
         # Optional Pop big
         pid = offense.roles.get("Pop_Spacer_Big")
-        if pid:
+        if pid and _pid_is_on_court(offense, pid):
             p = offense.find_player(pid)
             if p:
                 parts.append(("Pop_Spacer_Big", p, role_fit_score(p, "Pop_Spacer_Big")))

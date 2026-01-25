@@ -13,7 +13,7 @@ from .era import (
 )
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 # -------------------------
 # Probability model

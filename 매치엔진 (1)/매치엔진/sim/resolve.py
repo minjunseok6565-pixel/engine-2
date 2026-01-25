@@ -10,7 +10,7 @@ from .core import clamp, dot_profile, sigmoid
 from .defense import team_def_snapshot
 from .era import DEFAULT_PROB_MODEL
 from .participants import (
-    choose_assister_deterministic,
+    choose_assister_weighted,
     choose_creator_for_pulloff,
     choose_finisher_rim,
     choose_post_target,
@@ -20,6 +20,8 @@ from .participants import (
     choose_weighted_player,
     choose_default_actor,
     choose_fouler_pid,
+    choose_stealer_pid,
+    choose_blocker_pid,
     choose_orb_rebounder as _choose_orb_rebounder,
     choose_drb_rebounder as _choose_drb_rebounder,
 )
@@ -32,7 +34,7 @@ from .profiles import OUTCOME_PROFILES, CORNER3_PROB_BY_ACTION_BASE
 from .models import GameState, Player, TeamState
 
 if TYPE_CHECKING:
-    from config.game_config import GameConfig
+    from .game_config import GameConfig
 
 def _pick_default_actor(offense: TeamState) -> Player:
     """12-role first, then best passer. Used when an outcome has no specific participant chooser."""
@@ -153,6 +155,120 @@ def is_foul(o: str) -> bool: return o.startswith("FOUL_")
 def is_reset(o: str) -> bool: return o.startswith("RESET_")
 
 
+# -------------------------
+# Assist attribution tracking (pass history)
+# -------------------------
+#
+# We attribute assists to the *actual last successful passer* when possible.
+# Pass events are staged in ctx["_pending_pass_event"] during resolve_outcome()
+# and then committed in sim_possession.py *after* time cost has been applied,
+# so the recorded shot-clock timestamp matches the true timing window.
+
+_ASSIST_WINDOW_SEC = {
+    "SHOT_3_CS": 2.00,
+    "SHOT_MID_CS": 2.00,
+
+    "SHOT_RIM_LAYUP": 3.10,
+    "SHOT_RIM_DUNK": 3.10,
+    "SHOT_RIM_CONTACT": 3.10,
+
+    "SHOT_TOUCH_FLOATER": 2.40,
+    "SHOT_POST": 2.70,
+
+    "SHOT_3_OD": 0.95,
+    "SHOT_MID_PU": 0.80,
+}
+_DEFAULT_ASSIST_WINDOW_SEC = 2.40
+_PASS_HISTORY_MAXLEN = 3
+
+
+def clear_pass_tracking(ctx: Dict[str, Any]) -> None:
+    """Clear pass-history + staged pass event for the current possession sequence."""
+    if not isinstance(ctx, dict):
+        return
+    ctx.pop("_pending_pass_event", None)
+    ctx.pop("pass_history", None)
+    ctx.pop("_pass_seq", None)
+
+
+def commit_pending_pass_event(ctx: Dict[str, Any], game_state: Optional[GameState]) -> None:
+    """Commit staged pass event into pass_history using *post-time-cost* clocks.
+
+    Called by sim_possession.py immediately after apply_time_cost for a pass.
+    """
+    if not isinstance(ctx, dict):
+        return
+    ev = ctx.pop("_pending_pass_event", None)
+    if not isinstance(ev, dict):
+        return
+
+    pid = str(ev.get("pid") or "")
+    if not pid:
+        return
+
+    seq = int(ctx.get("_pass_seq", 0)) + 1
+    ctx["_pass_seq"] = seq
+
+    hist = ctx.get("pass_history")
+    if not isinstance(hist, list):
+        hist = []
+        ctx["pass_history"] = hist
+
+    sc = float(getattr(game_state, "shot_clock_sec", 0.0)) if game_state is not None else 0.0
+    gc = float(getattr(game_state, "clock_sec", 0.0)) if game_state is not None else 0.0
+
+    hist.append({
+        "seq": seq,
+        "pid": pid,
+        "outcome": str(ev.get("outcome") or ""),
+        "base_action": str(ev.get("base_action") or ""),
+        "shot_clock_sec": sc,
+        "game_clock_sec": gc,
+    })
+
+    if len(hist) > _PASS_HISTORY_MAXLEN:
+        del hist[:-_PASS_HISTORY_MAXLEN]
+
+
+def _assist_window_sec(shot_outcome: str) -> float:
+    return float(_ASSIST_WINDOW_SEC.get(str(shot_outcome), _DEFAULT_ASSIST_WINDOW_SEC))
+
+
+def pick_assister_from_history(
+    ctx: Dict[str, Any],
+    offense: TeamState,
+    shooter_pid: str,
+    game_state: Optional[GameState],
+    shot_outcome: str,
+) -> Optional[str]:
+    """Pick assister from pass_history if the last pass is within the assist window."""
+    if game_state is None:
+        return None
+    hist = ctx.get("pass_history")
+    if not isinstance(hist, list) or not hist:
+        return None
+
+    win = _assist_window_sec(shot_outcome)
+    shot_sc = float(getattr(game_state, "shot_clock_sec", 0.0))
+
+    for ev in reversed(hist):
+        if not isinstance(ev, dict):
+            continue
+        pid = str(ev.get("pid") or "")
+        if not pid or pid == str(shooter_pid or ""):
+            continue
+        if not offense.is_on_court(pid):
+            continue
+
+        pass_sc = float(ev.get("shot_clock_sec", 0.0))
+        dt = pass_sc - shot_sc
+        if 0.0 <= dt <= win:
+            return pid
+
+    return None
+
+
+
 def shot_zone_from_outcome(outcome: str) -> Optional[str]:
     if outcome in ("SHOT_RIM_LAYUP", "SHOT_RIM_DUNK", "SHOT_RIM_CONTACT", "SHOT_TOUCH_FLOATER"):
         return "rim"
@@ -194,6 +310,35 @@ def outcome_points(o: str) -> int:
     return 3 if o in ("SHOT_3_CS","SHOT_3_OD") else 2 if o.startswith("SHOT_") else 0
 
 
+def _should_award_fastbreak_fg(ctx: dict, first_fga_sc) -> bool:
+    """Fastbreak points should be credited on the *scoring FG event*, not at possession end.
+
+    Rules (v1):
+    - Only possessions that *originated* from a live-ball transition (after DRB / after TOV).
+    - Never credit during possession-continuation (dead-ball stop -> inbound -> set offense).
+    - Only credit within the early clock window, using the first FGA shot-clock snapshot.
+    - Free throws are intentionally excluded (handled elsewhere).
+    """
+    try:
+        origin = str(ctx.get("_pos_origin_start") or ctx.get("pos_start") or "")
+    except Exception:
+        origin = ""
+    if origin not in ("after_tov", "after_drb"):
+        return False
+    # Any dead-ball continuation segment implies defense is set -> not a fastbreak score.
+    if bool(ctx.get("_pos_continuation", False)):
+        return False
+    # Additional guardrail: explicit dead-ball inbound segments should never count as fastbreak.
+    if bool(ctx.get("dead_ball_inbound", False)):
+        return False
+    if first_fga_sc is None:
+        return False
+    try:
+        return float(first_fga_sc) >= 16.0
+    except Exception:
+        return False
+
+
 # -------------------------
 # Resolve sampled outcome into events
 # -------------------------
@@ -206,7 +351,6 @@ def resolve_outcome(
     defense: TeamState,
     tags: Dict[str, Any],
     pass_chain: int,
-    def_action: str,
     ctx: Optional[Dict[str, Any]] = None,
     game_state: Optional[GameState] = None,
     game_cfg: Optional["GameConfig"] = None,
@@ -230,6 +374,7 @@ def resolve_outcome(
         return payload
 
     if outcome == "TO_SHOT_CLOCK":
+        clear_pass_tracking(ctx)
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
@@ -279,6 +424,7 @@ def resolve_outcome(
     def_snap = team_def_snapshot(defense)
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
+        clear_pass_tracking(ctx)
         return "RESET", {"outcome": outcome}
 
     # choose participants
@@ -367,7 +513,8 @@ def resolve_outcome(
             q_score = 0.0
         q_delta = float(quality.score_to_logit_delta(outcome, q_score))
         # Reduce existing def_score impact on SHOT to avoid double counting.
-        def_score = float(quality.mix_def_score_for_shot(float(def_score)))
+        def_score_raw = float(def_score)
+        def_score = float(quality.mix_def_score_for_shot(float(def_score_raw)))
         shot_dbg = {}
         if debug_q:
             shot_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
@@ -402,7 +549,7 @@ def resolve_outcome(
         if zone_detail:
             offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
             offense.shot_zone_detail[zone_detail]["FGA"] += 1
-        if game_state is not None and "first_fga_shotclock_sec" not in ctx:
+        if game_state is not None and ctx.get("first_fga_shotclock_sec") is None:
             ctx["first_fga_shotclock_sec"] = float(game_state.shot_clock_sec)
         offense.add_player_stat(actor.pid, "FGA", 1)
         if pts == 3:
@@ -417,56 +564,77 @@ def resolve_outcome(
                 offense.add_player_stat(actor.pid, "3PM", 1)
             offense.pts += pts
             offense.add_player_stat(actor.pid, "PTS", pts)
+            # Fastbreak points: credit on the scoring FG event (exclude FT points).
+            try:
+                if _should_award_fastbreak_fg(ctx, ctx.get("first_fga_shotclock_sec")):
+                    offense.fastbreak_pts += int(pts)
+            except Exception as e:
+                _record_exception("fastbreak_pts_award_fg", e)
             if zone_detail:
                 offense.shot_zone_detail[zone_detail]["FGM"] += 1
 
-            assisted = False
+            assisted_heur = False
             assister_pid = None
             pass_chain_val = ctx.get("pass_chain", pass_chain)
             base_action = get_action_base(action, game_cfg)
 
             if "_CS" in outcome:
-                assisted = True
+                assisted_heur = True
             elif outcome in ("SHOT_RIM_LAYUP", "SHOT_RIM_DUNK", "SHOT_RIM_CONTACT"):
                 # Rim finishes: strongly assisted off movement/advantage actions.
                 if pass_chain_val and float(pass_chain_val) > 0:
-                    assisted = True
+                    assisted_heur = True
                 else:
                     # 컷/롤/핸드오프 계열은 패스 동반 가능성이 높음 (PnR 세부액션 포함)
                     if base_action in ("Cut", "PnR", "DHO") and rng.random() < 0.90:
-                        assisted = True
+                        assisted_heur = True
                     elif base_action in ("Kickout", "ExtraPass") and rng.random() < 0.70:
-                        assisted = True
+                        assisted_heur = True
                     elif base_action == "Drive" and rng.random() < 0.7:
-                        assisted = True
+                        assisted_heur = True
             elif outcome == "SHOT_TOUCH_FLOATER":
                 # Touch/floater: reduce assisted credit to pull down Paint_Non_RA AST share.
                 if pass_chain_val and float(pass_chain_val) >= 2:
-                    assisted = True
+                    assisted_heur = True
                 else:
                     if base_action in ("Cut", "PnR", "DHO") and rng.random() < 0.55:
-                        assisted = True
+                        assisted_heur = True
                     elif base_action in ("Kickout", "ExtraPass") and rng.random() < 0.40:
-                        assisted = True
+                        assisted_heur = True
                     elif base_action == "Drive" and rng.random() < 0.18:
-                        assisted = True
+                        assisted_heur = True
             elif outcome == "SHOT_3_OD":
                 # OD 3도 2+패스 연쇄에서는 일부 assist로 잡히는 편이 자연스럽다
                 if pass_chain_val and float(pass_chain_val) >= 2 and base_action in ("PnR", "DHO", "Kickout", "ExtraPass") and rng.random() < 0.28:
-                    assisted = True
+                    assisted_heur = True
             # "_PU" 계열은 기본적으로 unassisted로 둔다
 
-            if assisted:
-                assister = choose_assister_deterministic(offense, actor.pid)
-                if assister:
-                    assister_pid = assister.pid
-                    offense.ast += 1
-                    offense.add_player_stat(assister.pid, "AST", 1)
-                    if zone_detail:
-                        offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
+            # Prefer the true last passer if we have a committed pass event in the assist window.
+            assister_pid = pick_assister_from_history(ctx, offense, actor.pid, game_state, outcome)
+
+            assisted = False
+            if assister_pid is not None:
+                assisted = True
+            else:
+                assisted = bool(assisted_heur)
+                if assisted:
+                    assister = choose_assister_weighted(rng, offense, actor.pid, base_action, outcome, style=style)
+                    if assister:
+                        assister_pid = assister.pid
+                    else:
+                        assisted = False
+                        assister_pid = None
+
+            if assister_pid is not None:
+                offense.ast += 1
+                offense.add_player_stat(assister_pid, "AST", 1)
+                if zone_detail:
+                    offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
 
             if zone_detail in ("Restricted_Area", "Paint_Non_RA"):
                 offense.pitp += 2
+
+            clear_pass_tracking(ctx)
 
             return "SCORE", _with_team({
                 "outcome": outcome,
@@ -478,7 +646,7 @@ def resolve_outcome(
                 **shot_dbg,
             })
         else:
-            return "MISS", _with_team({
+            payload = {
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -486,7 +654,57 @@ def resolve_outcome(
                 "assisted": False,
                 "assister_pid": None,
                 **shot_dbg,
-            })
+            }
+
+            # BLOCK: on missed shots only, sample whether the miss was a block and credit a defender.
+            # This is intentionally a "miss subtype" so it doesn't distort make rates.
+            try:
+                if kind == "shot_rim":
+                    base_block = float(pm.get("block_base_rim", 0.085))
+                elif kind == "shot_post":
+                    base_block = float(pm.get("block_base_post", 0.065))
+                elif kind == "shot_mid":
+                    base_block = float(pm.get("block_base_mid", 0.022))
+                else:  # shot_3
+                    base_block = float(pm.get("block_base_3", 0.012))
+
+                def_feat = getattr(style, "def_features", {}) if style is not None else {}
+                d_rim = float(def_feat.get("D_RIM_PROTECT", 0.5))
+                d_poa = float(def_feat.get("D_POA", 0.5))
+                d_help = float(def_feat.get("D_HELP_CLOSEOUT", 0.5))
+
+                if kind in ("shot_rim", "shot_post"):
+                    block_logit_delta = (-float(q_score)) * 0.30 + (d_rim - 0.5) * 1.00 + (d_help - 0.5) * 0.35
+                else:
+                    block_logit_delta = (-float(q_score)) * 0.25 + (d_poa - 0.5) * 0.70 + (d_help - 0.5) * 0.25
+
+                block_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_block = prob_from_scores(
+                    rng,
+                    base_block,
+                    def_score_raw,
+                    off_score,
+                    kind="block",
+                    variance_mult=block_var,
+                    logit_delta=float(block_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_block:
+                    blocker_pid = choose_blocker_pid(rng, defense, kind)
+                    if blocker_pid:
+                        defense.add_player_stat(blocker_pid, "BLK", 1)
+                    payload.update({"blocked": True, "blocker_pid": blocker_pid, "block_kind": kind})
+
+                if debug_q:
+                    payload["p_block"] = float(p_block)
+                    payload["block_logit_delta"] = float(block_logit_delta)
+            except Exception as e:
+                _record_exception("block_model", e)
+                
+            clear_pass_tracking(ctx)
+            return "MISS", _with_team(payload)
+
 
     if is_pass(outcome):
         pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
@@ -572,7 +790,57 @@ def resolve_outcome(
                         "carry_in": float(carry_in),
                     }
                 )
+            # STEAL / LINEOUT split for TO_BAD_PASS:
+            # - If intercepted, credit STL and mark as a live-ball steal (strong transition start).
+            # - Otherwise, allow some bad passes to become dead-ball lineouts to reduce "all live-ball" feel.
+            p_steal = 0.0
+            p_lineout = 0.0
+            try:
+                steal_base = float(pm.get("steal_bad_pass_base", 0.60))
+                steal_mult = {
+                    "PASS_SKIP": 1.13,
+                    "PASS_EXTRA": 1.03,
+                    "PASS_KICKOUT": 0.97,
+                    "PASS_SHORTROLL": 0.92,
+                }.get(outcome, 1.00)
+                base_steal = steal_base * float(steal_mult)
+
+                def_feat = getattr(style, "def_features", {}) if style is not None else {}
+                d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
+                steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+
+                steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_steal = prob_from_scores(
+                    rng,
+                    base_steal,
+                    def_score,
+                    off_score,
+                    kind="steal",
+                    variance_mult=steal_var,
+                    logit_delta=float(steal_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_steal:
+                    stealer_pid = choose_stealer_pid(rng, defense)
+                    if stealer_pid:
+                        defense.add_player_stat(stealer_pid, "STL", 1)
+                    payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
+                else:
+                    lineout_base = float(pm.get("bad_pass_lineout_base", 0.30))
+                    p_lineout = clamp(lineout_base + max(0.0, -float(q_score)) * 0.06, 0.05, 0.55)
+                    if rng.random() < p_lineout:
+                        payload.update({"deadball_override": True, "tov_deadball_reason": "LINEOUT_BAD_PASS"})
+
+                if debug_q:
+                    payload.setdefault("probs", {}).update({"p_steal": float(p_steal), "p_lineout": float(p_lineout)})
+            except Exception as e:
+                _record_exception("steal_split_bad_pass", e)
+
+            clear_pass_tracking(ctx)
+
             return "TURNOVER", _with_team(payload)
+
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
         p_reset = float(sigmoid(s_reset * (t_reset - q_score)))
@@ -589,6 +857,8 @@ def resolve_outcome(
                         "carry_in": float(carry_in),
                     }
                 )
+            clear_pass_tracking(ctx)
+                
             return "RESET", payload
 
         # For normal quality passes: sample completion. On success, store carry bucket.
@@ -626,7 +896,8 @@ def resolve_outcome(
                     _record_exception("carry_logit_delta_prev_parse", e)
                     prev = 0.0
                 ctx["carry_logit_delta"] = float(quality.apply_pass_carry(prev + carry_out, next_outcome="*"))
-
+                
+            ctx["_pending_pass_event"] = {"pid": actor.pid, "outcome": outcome, "base_action": base_action}
             payload = {"outcome": outcome, "pass_chain": pass_chain + 1}
             if debug_q:
                 payload.update(
@@ -654,12 +925,114 @@ def resolve_outcome(
             payload.update(
                 {"q_score": q_score, "q_detail": q_detail, "carry_in": float(carry_in), "p_ok": float(p_ok)}
             )
+        clear_pass_tracking(ctx)
+        
         return "RESET", payload
 
     if is_to(outcome):
+        clear_pass_tracking(ctx)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
+        
+        payload: Dict[str, Any] = {"outcome": outcome, "pid": actor.pid}
+
+        # For select live-ball turnovers, split into (steal vs non-steal) so defensive playmakers
+        # are credited and downstream possession context can reflect stronger transition starts.
+        if outcome in ("TO_BAD_PASS", "TO_HANDLE_LOSS"):
+            scheme = getattr(defense.tactics, "defense_scheme", "")
+            debug_q = bool(ctx.get("debug_quality", False))
+            role_players = get_or_build_def_role_players(
+                ctx,
+                defense,
+                scheme=scheme,
+                debug_detail_key=("def_role_players_detail" if debug_q else None),
+            )
+
+            q_detail = None
+            q_score = 0.0
+            try:
+                if debug_q:
+                    q_detail = quality.compute_quality_score(
+                        scheme=scheme,
+                        base_action=base_action,
+                        outcome=outcome,
+                        role_players=role_players,
+                        get_stat=engine_get_stat,
+                        return_detail=True,
+                    )
+                    q_score = float(q_detail.score)
+                else:
+                    q_score = float(
+                        quality.compute_quality_score(
+                            scheme=scheme,
+                            base_action=base_action,
+                            outcome=outcome,
+                            role_players=role_players,
+                            get_stat=engine_get_stat,
+                        )
+                    )
+            except Exception as e:
+                _record_exception("quality_compute_to", e)
+                q_score = 0.0
+
+            def_feat = getattr(style, "def_features", {}) if style is not None else {}
+            d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
+
+            p_steal = 0.0
+            p_lineout = 0.0
+            steal_logit_delta = 0.0
+            try:
+                if outcome == "TO_BAD_PASS":
+                    base_steal = float(pm.get("steal_bad_pass_base", 0.60))
+                    steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+                    lineout_base = float(pm.get("bad_pass_lineout_base", 0.30))
+                    p_lineout = clamp(lineout_base + max(0.0, -float(q_score)) * 0.06, 0.05, 0.55)
+                else:  # TO_HANDLE_LOSS
+                    base_steal = float(pm.get("steal_handle_loss_base", 0.72))
+                    steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00
+                    p_lineout = clamp(0.10 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
+
+                steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_steal = prob_from_scores(
+                    rng,
+                    base_steal,
+                    def_score,
+                    off_score,
+                    kind="steal",
+                    variance_mult=steal_var,
+                    logit_delta=float(steal_logit_delta),
+                    game_cfg=game_cfg,
+                )
+
+                if rng.random() < p_steal:
+                    stealer_pid = choose_stealer_pid(rng, defense)
+                    if stealer_pid:
+                        defense.add_player_stat(stealer_pid, "STL", 1)
+                    payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
+                else:
+                    if rng.random() < p_lineout:
+                        payload.update(
+                            {
+                                "deadball_override": True,
+                                "tov_deadball_reason": ("LINEOUT_BAD_PASS" if outcome == "TO_BAD_PASS" else "LINEOUT_LOOSE"),
+                            }
+                        )
+
+                if debug_q:
+                    payload.update(
+                        {
+                            "q_score": float(q_score),
+                            "q_detail": q_detail,
+                            "p_steal": float(p_steal),
+                            "p_lineout": float(p_lineout),
+                            "steal_logit_delta": float(steal_logit_delta),
+                        }
+                    )
+            except Exception as e:
+                _record_exception("steal_split_to", e)
+
+        return "TURNOVER", _with_team(payload)
+
     if is_foul(outcome):
         fouler_pid = None
         team_fouls = ctx.get("team_fouls") or {}
@@ -671,7 +1044,7 @@ def resolve_outcome(
 
         # assign a random fouler from on-court defenders (MVP)
         if def_on_court:
-            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit)
+            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
                 if game_state is not None:
@@ -689,6 +1062,7 @@ def resolve_outcome(
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
                 if game_state is not None:
                     game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+            clear_pass_tracking(ctx)
             return "FOUL_NO_SHOTS", _with_team(
                 {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False},
                 include_fouler=True,
@@ -804,7 +1178,7 @@ def resolve_outcome(
                 if zone_detail:
                     offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
                     offense.shot_zone_detail[zone_detail]["FGA"] += 1
-                if game_state is not None and "first_fga_shotclock_sec" not in ctx:
+                if game_state is not None and ctx.get("first_fga_shotclock_sec") is None:
                     ctx["first_fga_shotclock_sec"] = float(game_state.shot_clock_sec)
                 if pts == 3:
                     offense.tpa += 1
@@ -817,29 +1191,49 @@ def resolve_outcome(
                     offense.add_player_stat(actor.pid, "3PM", 1)
                 offense.pts += pts
                 offense.add_player_stat(actor.pid, "PTS", pts)
+                # Fastbreak points: credit only the made FG (exclude subsequent FT).
+                try:
+                    if _should_award_fastbreak_fg(ctx, ctx.get("first_fga_shotclock_sec")):
+                        offense.fastbreak_pts += int(pts)
+                except Exception as e:
+                    _record_exception("fastbreak_pts_award_fg", e)
                 and_one = True
                 if zone_detail:
                     offense.shot_zone_detail[zone_detail]["FGM"] += 1
 
                 # minimal assist treatment on rim fouls (jumper fouls remain unassisted)
-                assisted = False
+                assisted_heur = False
                 assister_pid = None
                 if shot_key != "SHOT_3_OD":
                     try:
-                        assisted = bool(ctx.get("pass_chain", pass_chain)) and float(
+                        assisted_heur = bool(ctx.get("pass_chain", pass_chain)) and float(
                             ctx.get("pass_chain", pass_chain)
                         ) > 0
                     except Exception as e:
                         _record_exception("assist_flag_parse", e)
-                        assisted = False
-                if assisted:
-                    assister = choose_assister_deterministic(offense, actor.pid)
-                    if assister:
-                        assister_pid = assister.pid
-                        offense.ast += 1
-                        offense.add_player_stat(assister.pid, "AST", 1)
-                        if zone_detail:
-                            offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
+                        assisted_heur = False
+
+                # Prefer true last passer within the assist window (based on shot_key).
+                assister_pid = pick_assister_from_history(ctx, offense, actor.pid, game_state, shot_key)
+
+                assisted = False
+                if assister_pid is not None:
+                    assisted = True
+                else:
+                    assisted = bool(assisted_heur)
+                    if assisted:
+                        assister = choose_assister_weighted(rng, offense, actor.pid, base_action, shot_key, style=style)
+                        if assister:
+                            assister_pid = assister.pid
+                        else:
+                            assisted = False
+                            assister_pid = None
+
+                if assister_pid is not None:
+                    offense.ast += 1
+                    offense.add_player_stat(assister_pid, "AST", 1)
+                    if zone_detail:
+                        offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
 
                 if zone_detail in ("Restricted_Area", "Paint_Non_RA"):
                     offense.pitp += 2
@@ -869,10 +1263,13 @@ def resolve_outcome(
             payload.update(ft_res)
         if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
+        clear_pass_tracking(ctx)
         return "FOUL_FT", _with_team(payload, include_fouler=True)
 
 
     if is_reset(outcome):
+        clear_pass_tracking(ctx)
         return "RESET", {"outcome": outcome}
 
+    clear_pass_tracking(ctx)
     return "RESET", {"outcome": outcome}

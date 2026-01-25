@@ -11,7 +11,6 @@ from .profiles import (
     ACTION_ALIASES,
     ACTION_OUTCOME_PRIORS,
     DEFENSE_SCHEME_MULT,
-    DEF_SCHEME_ACTION_WEIGHTS,
     OFFENSE_SCHEME_MULT,
     OFF_SCHEME_ACTION_WEIGHTS,
     PASS_BASE_SUCCESS,
@@ -43,6 +42,30 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "ft_range": 0.47,
     "ft_min": 0.40,
     "ft_max": 0.95,
+
+    # Steal / block event modeling (used by resolve.py; 0-1)
+    # NOTE: These are event probabilities, not boxscore rates. They are intended to be
+    # combined with score/quality modulation (prob_from_scores) and contextual deltas.
+    "steal_bad_pass_base": 0.60,
+    "steal_handle_loss_base": 0.72,
+    "bad_pass_lineout_base": 0.30,
+
+    "block_base_rim": 0.085,
+    "block_base_post": 0.065,
+    "block_base_mid": 0.022,
+    "block_base_3": 0.012,
+
+    # Block outcomes: out-of-bounds -> offense retains (dead-ball) vs live rebound.
+    "block_oob_base_rim": 0.32,
+    "block_oob_base_post": 0.30,
+    "block_oob_base_mid": 0.18,
+    "block_oob_base_3": 0.12,
+
+    # If a blocked miss stays in-play, it is harder for the offense to recover the ball.
+    "blocked_orb_mult_rim": 0.78,
+    "blocked_orb_mult_post": 0.80,
+    "blocked_orb_mult_mid": 0.86,
+    "blocked_orb_mult_3": 0.88,
 }
 
 
@@ -58,6 +81,8 @@ DEFAULT_LOGISTIC_PARAMS: Dict[str, Dict[str, float]] = {
     "shot_post":{"scale": 20.0, "sensitivity": 1.0 / 20.0},   # post shots
     "pass":     {"scale": 28.0, "sensitivity": 1.0 / 28.0},   # pass success
     "rebound":  {"scale": 22.0, "sensitivity": 1.0 / 22.0},   # ORB% model (legacy)
+    "steal":    {"scale": 26.0, "sensitivity": 1.0 / 26.0},   # turnover->steal split
+    "block":    {"scale": 28.0, "sensitivity": 1.0 / 28.0},   # miss->block split
     "turnover": {"scale": 24.0, "sensitivity": 1.0 / 24.0},   # reserved (TO is prior-only)
 }
 
@@ -71,6 +96,8 @@ DEFAULT_VARIANCE_PARAMS: Dict[str, Any] = {
         "shot_post": 1.00,
         "pass": 0.85,
         "rebound": 0.60,
+        "steal": 0.75,
+        "block": 0.80,
     },
     # optional per-team multiplier range (clamped)
     "team_mult_lo": 0.60,
@@ -140,25 +167,123 @@ MVP_RULES = {
         "setup_after_score": 3.5,
         "setup_after_drb": 3.1,
         "setup_after_tov": 2.1,
+        "setup_after_steal": 1.5,
+        "setup_after_block": 1.9,
         "FoulStop": 2.6,
+        "BlockOOBStop": 2.0,
         "PnR": 8.3,
         "DHO": 7.1,
         "Drive": 6.2,
         "PostUp": 8.2,
         "HornsSet": 7.0,
         "SpotUp": 4.4,
+        "QuickShot": 1.2,
         "Cut": 4.6,
         "TransitionEarly": 4.0,
         "Kickout": 2.8,
         "ExtraPass": 3.0,
         "Reset": 4.5,
     },
+
+    "timing": {
+        "min_release_window": 0.7,
+        "urgent_budget_sec": 8.0,
+        "quickshot_cost_sec": 1.2,
+        "soft_slack_span": 4.0,
+        "soft_slack_floor": 0.20,
+        "quickshot_inject_base": 0.05,
+        "quickshot_inject_urgency_mult": 0.35,
+        "pass_reset_suppress_urgency": 0.85
+    },
+
+    # --- Context indices (continuous; used to compute pressure_index / garbage_index) ---
+    # Used by sim_game.py to compute pressure_index / garbage_index in [0..1].
+    # Tune to get the *feel* you want without hard mode switches.
+    "context_indices": {
+        # Points per possession estimate for converting score margin -> possession margin
+        "ppp_estimate": 1.10,
+
+        # Pressure (late-game, close): time window and "close" threshold in possessions
+        "pressure_window_sec": 180.0,
+        "pressure_poss_close": 3.0,
+
+        # Garbage (late-game, blowout): time window and blowout band (start -> full) in possessions
+        "garbage_window_sec": 360.0,
+        "garbage_poss_start": 6.0,
+        "garbage_poss_full": 9.0,
+    },
     
     "transition_weight_mult": {
         "default": 1.0,
         "after_drb": 4.5,
         "after_tov": 6.0,
+        "after_steal": 7.5,
+        "after_block": 6.3,
     },
+ 
+     # --- Timeouts (dead-ball only, v1) ---
+     "timeouts": {"per_team": 7},
+ 
+     "timeout_ai": {
+         "enabled": True,
+         "deadball_only": True,
+         # v1: allow either team to call timeout during dead-ball (simplifies TO-streak trigger realism)
+         "allow_both_teams_deadball": True,
+ 
+         # Cooldown in possessions (easy & stable)
+         "cooldown_possessions": 3,
+ 
+         # base probability (usually 0; triggers drive decisions)
+         "p_base": 0.00,
+ 
+         # Trigger G-1: stop opponent run (consecutive scoring points)
+         "run_pts_threshold": 8,
+         "run_pts_hard": 12,
+         "p_run": 0.30,
+ 
+         # Trigger G-2: "this is ugly" streak (same team consecutive turnovers)
+         "to_streak_threshold": 3,
+         "to_streak_hard": 4,
+         "p_to": 0.22,
+ 
+         # Optional secondary triggers (tune freely)
+         "p_pressure": 0.16,
+         "p_fatigue": 0.10,
+         "fatigue_threshold": 0.55,
+ 
+         # hard cap
+         "p_cap": 0.85,
+     },
+ 
+     "timeout_value": {
+         # H: timeouts are "more spendable" when you have many, less when you have few
+         "remaining_alpha": 0.70,
+ 
+         # H: blowout suppression (applies to both sides)
+         "blowout_soft": 10,
+         "blowout_hard": 18,
+         "blowout_floor": 0.30,
+ 
+         # H: score-bias asymmetry (losing team calls more; winning team calls less)
+         "trail_scale": 12.0,
+         "trail_k": 0.35,      # max +35% when trailing by >= trail_scale
+         "lead_scale": 12.0,
+         "lead_k": 0.35,       # max -35% when leading by >= lead_scale
+         "lead_floor": 0.55,   # don't go below this from lead bias alone
+ 
+         # H: late-game is more conservative
+         "late_beta": 0.50,    # linear downweight vs regulation progress
+         "late_floor": 0.60,
+     },
+ 
+     # Recovery is optional; default off for v1 (can enable later)
+     "timeout_recovery": {
+         "enabled": False,
+         # "equivalent break seconds" to apply as recovery effect
+         "equiv_break_sec": 12.0,
+         "on_court_mult": 1.0,
+         "bench_mult": 1.0,
+     },
 }
 
 DEFENSE_META_PARAMS = {
@@ -322,7 +447,6 @@ DEFAULT_ERA: Dict[str, Any] = {
     "action_aliases": dict(ACTION_ALIASES),
 
     "off_scheme_action_weights": copy.deepcopy(OFF_SCHEME_ACTION_WEIGHTS),
-    "def_scheme_action_weights": copy.deepcopy(DEF_SCHEME_ACTION_WEIGHTS),
 
     "offense_scheme_mult": copy.deepcopy(OFFENSE_SCHEME_MULT),
     "defense_scheme_mult": copy.deepcopy(DEFENSE_SCHEME_MULT),
@@ -415,7 +539,7 @@ def validate_and_fill_era_dict(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Lis
     required_blocks = [
         "shot_base", "pass_base_success",
         "action_outcome_priors", "action_aliases",
-        "off_scheme_action_weights", "def_scheme_action_weights",
+        "off_scheme_action_weights", 
         "offense_scheme_mult", "defense_scheme_mult",
         "prob_model", "knobs",
         "logistic_params", "variance_params",

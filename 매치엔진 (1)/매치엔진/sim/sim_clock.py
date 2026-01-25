@@ -16,9 +16,24 @@ def apply_time_cost(game_state: GameState, cost: float, tempo_mult: float) -> No
     game_state.shot_clock_sec -= adj
     game_state.clock_sec = max(game_state.clock_sec - adj, 0.0)
 
-def apply_dead_ball_cost(game_state: GameState, cost: float, tempo_mult: float) -> None:
-    """Dead-ball time: game clock runs, shot clock does not."""
+def apply_dead_ball_cost(
+    game_state: GameState,
+    cost: float,
+    tempo_mult: float,
+    *,
+    run_shot_clock: bool = False,
+) -> None:
+    """Setup/dead-ball time.
+
+    The game clock always runs.
+
+    By default (dead-ball), the shot clock does NOT run.
+    For live transitions / bring-up segments where the shot clock should also elapse,
+    set `run_shot_clock=True`.
+    """
     adj = float(cost) * float(tempo_mult)
+    if run_shot_clock:
+        game_state.shot_clock_sec -= adj
     game_state.clock_sec = max(game_state.clock_sec - adj, 0.0)
 
 def simulate_inbound(

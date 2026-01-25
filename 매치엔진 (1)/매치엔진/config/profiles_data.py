@@ -245,60 +245,6 @@ OFF_SCHEME_ACTION_WEIGHTS: Dict[str, Dict[str, float]] = {
     },
 }
 
-# Defense scheme -> 'def_action' weights
-# NOTE: def_action is currently used mainly for logging/feel and as a tuning hook.
-# Keep the key-space small and stable; you can expand later if you start using def_action in resolve.
-DEF_SCHEME_ACTION_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "Drop": {
-        "Contain": 40,
-        "Help": 25,
-        "Pressure": 10,
-        "Switch": 15,
-        "Zone_Shift": 10,
-    },
-    "Switch_Everything": {
-        "Contain": 20,
-        "Help": 20,
-        "Pressure": 15,
-        "Switch": 35,
-        "Zone_Shift": 10,
-    },
-    "Hedge_ShowRecover": {
-        "Contain": 25,
-        "Help": 20,
-        "Pressure": 20,
-        "Switch": 20,
-        "Zone_Shift": 15,
-    },
-    "Blitz_TrapPnR": {
-        "Contain": 15,
-        "Help": 15,
-        "Pressure": 40,
-        "Switch": 20,
-        "Zone_Shift": 10,
-    },
-    "ICE_SidePnR": {
-        "Contain": 35,
-        "Help": 25,
-        "Pressure": 10,
-        "Switch": 15,
-        "Zone_Shift": 15,
-    },
-    "Zone": {
-        "Contain": 10,
-        "Help": 20,
-        "Pressure": 10,
-        "Switch": 10,
-        "Zone_Shift": 50,
-    },
-    "PackLine_GapHelp": {
-        "Contain": 25,
-        "Help": 35,
-        "Pressure": 5,
-        "Switch": 15,
-        "Zone_Shift": 20,
-    },
-}
 
 # -------------------------
 # Action outcome priors (include fouls)
@@ -438,6 +384,7 @@ ACTION_ALIASES = {
     "ScreenTheScreener_STS": "Cut",
     "SecondaryBreak": "TransitionEarly",
     "QuickPost": "PostUp",
+    "QuickShot": "SpotUp",
 }
 
 
