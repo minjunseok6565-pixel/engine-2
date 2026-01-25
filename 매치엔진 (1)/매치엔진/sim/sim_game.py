@@ -724,7 +724,7 @@ def simulate_game(
             if skip_deadball_phase:
                 timeout_evt = None
             else:
-            try:
+                try:
                 next_offense_side = str(team_key(offense, home))
                 home_on = list(game_state.on_court_home or [])
                 away_on = list(game_state.on_court_away or [])
@@ -750,16 +750,16 @@ def simulate_game(
                     if break_sec > 0:
                         _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
                         _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
-            except Exception as e:
-                # Timeout logic must never break simulation.
-                _push_debug_error(
-                    "timeout.deadball_phase",
-                    e,
-                    {
-                        "pos_start": str(pos_start),
-                        "next_offense_side": str(team_key(offense, home)),
-                    },
-                )
+                except Exception as e:
+                    # Timeout logic must never break simulation.
+                    _push_debug_error(
+                        "timeout.deadball_phase",
+                        e,
+                        {
+                            "pos_start": str(pos_start),
+                            "next_offense_side": str(team_key(offense, home)),
+                        },
+                    )
 
             # --- Substitution window (dead-ball only, 8-A ready) ---
             # Substitutions are allowed ONLY on dead-ball windows:
