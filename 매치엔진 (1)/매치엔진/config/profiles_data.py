@@ -263,7 +263,8 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "PASS_SHORTROLL": 0.155,
         "FOUL_DRAW_JUMPER": 0.01,
         "FOUL_DRAW_RIM": 0.11,
-        "TO_HANDLE_LOSS": 0.02,
+        "TO_HANDLE_LOSS": 0.02
+        "TO_CHARGE": 0.015,
         "RESET_RESREEN": 0.059,
         "RESET_HUB": 0.03,
     },
@@ -279,6 +280,7 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "FOUL_DRAW_JUMPER": 0.02,
         "FOUL_DRAW_RIM": 0.055,
         "TO_HANDLE_LOSS": 0.02,
+        "TO_CHARGE": 0.015,
         "RESET_REDO_DHO": 0.094,
     },
     "Drive": {
@@ -297,18 +299,20 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
     },
     "Kickout": {
         "SHOT_MID_CS": 0.04,
-        "SHOT_3_CS": 0.43,
+        "SHOT_3_CS": 0.35,
         "PASS_EXTRA": 0.2,
-        "PASS_SKIP": 0.105,
+        "PASS_SKIP": 0.14,
         "FOUL_DRAW_JUMPER": 0.022,
         "RESET_HUB": 0.078,
+        "TO_HANDLE_LOSS": 0.017,
     },
     "ExtraPass": {
         "SHOT_MID_CS": 0.06,
-        "SHOT_3_CS": 0.44,
-        "PASS_EXTRA": 0.25,
-        "PASS_SKIP": 0.18,
+        "SHOT_3_CS": 0.35,
+        "PASS_EXTRA": 0.3,
+        "PASS_SKIP": 0.2,
         "FOUL_DRAW_JUMPER": 0.02,
+        "TO_HANDLE_LOSS": 0.01,
         "RESET_HUB": 0.215,
     },
     "PostUp": {
@@ -319,6 +323,7 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "PASS_SKIP": 0.085,
         "FOUL_DRAW_POST": 0.15,
         "TO_HANDLE_LOSS": 0.02,
+        "TO_CHARGE": 0.015,
         "RESET_POST_OUT": 0.078,
     },
     "HornsSet": {
@@ -327,13 +332,16 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "SHOT_3_CS": 0.16,
         "PASS_EXTRA": 0.2,
         "FOUL_DRAW_JUMPER": 0.01,
+        "TO_HANDLE_LOSS": 0.017,
+        "TO_CHARGE": 0.015,
         "RESET_HUB": 0.345,
     },
     "SpotUp": {
-        "SHOT_MID_CS": 0.13,
-        "SHOT_3_CS": 0.56,
-        "FOUL_DRAW_JUMPER": 0.02,
-        "RESET_HUB": 0.189,
+        "SHOT_MID_CS": 0.17,
+        "SHOT_3_CS": 0.48,
+        "FOUL_DRAW_JUMPER": 0.05,
+        "RESET_HUB": 0.2,
+        "TO_HANDLE_LOSS": 0.017,
     },
     "Cut": {
         "SHOT_RIM_CONTACT": 0.09,
@@ -344,6 +352,7 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "PASS_KICKOUT": 0.1,
         "FOUL_DRAW_RIM": 0.185,
         "TO_HANDLE_LOSS": 0.017,
+        "TO_CHARGE": 0.015,
         "RESET_HUB": 0.109,
     },
     "TransitionEarly": {
@@ -357,6 +366,7 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "PASS_KICKOUT": 0.145,
         "FOUL_DRAW_RIM": 0.115,
         "TO_HANDLE_LOSS": 0.022,
+        "TO_CHARGE": 0.015,
         "RESET_HUB": 0.085,
     },
 }
