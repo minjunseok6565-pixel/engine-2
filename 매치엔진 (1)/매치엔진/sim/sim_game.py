@@ -725,31 +725,31 @@ def simulate_game(
                 timeout_evt = None
             else:
                 try:
-                next_offense_side = str(team_key(offense, home))
-                home_on = list(game_state.on_court_home or [])
-                away_on = list(game_state.on_court_away or [])
-                home_fmap = game_state.fatigue.get(HOME, {}) if isinstance(game_state.fatigue, dict) else {}
-                away_fmap = game_state.fatigue.get(AWAY, {}) if isinstance(game_state.fatigue, dict) else {}
-                avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
-                avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
-                timeout_evt = maybe_timeout_deadball(
-                    rng,
-                    game_state,
-                    rules,
-                    pos_start=str(pos_start),
-                    next_offense_side=next_offense_side,
-                    pressure_index=float(pressure_index),
-                    avg_energy_home=float(avg_energy_home),
-                    avg_energy_away=float(avg_energy_away),
-                    home_team_id=home_team_id,
-                    away_team_id=away_team_id,
-                )
-                rec = rules.get("timeout_recovery", {})
-                if timeout_evt and isinstance(rec, dict) and bool(rec.get("enabled", False)):
-                    break_sec = float(rec.get("equiv_break_sec", 12.0))
-                    if break_sec > 0:
-                        _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
-                        _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
+                    next_offense_side = str(team_key(offense, home))
+                    home_on = list(game_state.on_court_home or [])
+                    away_on = list(game_state.on_court_away or [])
+                    home_fmap = game_state.fatigue.get(HOME, {}) if isinstance(game_state.fatigue, dict) else {}
+                    away_fmap = game_state.fatigue.get(AWAY, {}) if isinstance(game_state.fatigue, dict) else {}
+                    avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
+                    avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
+                    timeout_evt = maybe_timeout_deadball(
+                        rng,
+                        game_state,
+                        rules,
+                        pos_start=str(pos_start),
+                        next_offense_side=next_offense_side,
+                        pressure_index=float(pressure_index),
+                        avg_energy_home=float(avg_energy_home),
+                        avg_energy_away=float(avg_energy_away),
+                        home_team_id=home_team_id,
+                        away_team_id=away_team_id,
+                    )
+                    rec = rules.get("timeout_recovery", {})
+                    if timeout_evt and isinstance(rec, dict) and bool(rec.get("enabled", False)):
+                        break_sec = float(rec.get("equiv_break_sec", 12.0))
+                        if break_sec > 0:
+                            _apply_break_recovery(home, home_on, game_state, rules, break_sec, home)
+                            _apply_break_recovery(away, away_on, game_state, rules, break_sec, home)
                 except Exception as e:
                     # Timeout logic must never break simulation.
                     _push_debug_error(
