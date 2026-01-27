@@ -35,7 +35,7 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "rebound_scale": 22.0,
 
     # ORB baseline used in rebound_orb_probability()
-    "orb_base": 0.33,
+    "orb_base": 0.23,
 
     # FT model used in resolve_free_throws()
     "ft_base": 0.45,
