@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import is_dataclass
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set
 
 from .models import GameState, TeamState
 
@@ -33,21 +32,12 @@ _RESERVED_KEYS: Set[str] = {
     "on_court_home",
     "on_court_away",
     "on_court_by_team_id",
-    # team mapping
+    # team mapping (derived only)
     "team_side",
     "team_id",
     "opp_side",
     "opp_team_id",
 }
-
-
-def _side_other(side: str) -> str:
-    s = str(side)
-    if s == "home":
-        return "away"
-    if s == "away":
-        return "home"
-    raise ValueError(f"invalid team_side: {side!r}")
 
 
 def _safe_int(x: Any, default: int = 0) -> int:
@@ -64,11 +54,7 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return float(default)
 
 def _fmt_clock_mmss(clock_sec: Any) -> str:
-    """
-    Format remaining period clock seconds into 'MM:SS'.
-    - We floor/truncate toward 0 for display (9:32.9 -> 9:32).
-    - Clamp negative to 0.
-    """
+    """Format remaining period clock seconds into 'MM:SS'."""
     sec = _safe_float(clock_sec, 0.0)
     if sec < 0:
         sec = 0.0
@@ -78,10 +64,7 @@ def _fmt_clock_mmss(clock_sec: Any) -> str:
     return f"{m:02d}:{r:02d}"
 
 def _round_1dp(x: Any) -> Any:
-    """
-    Round numeric values to 1 decimal place (for readability in replay logs).
-    Leaves None and non-numerics untouched.
-    """
+    """Round numeric values to 1 decimal place (for readability in replay logs)."""
     if x is None:
         return None
     try:
@@ -131,41 +114,39 @@ def _compute_game_elapsed_sec(game_state: GameState, rules: Optional[Mapping[str
     return _safe_int(prior + elapsed_in_period, 0)
 
 
-def _get_team_id(team: TeamState) -> str:
-    # In current project, TeamState.name is already effectively team_id.
-    # If team.team_id exists, prefer it.
-    tid = getattr(team, "team_id", None)
-    if tid:
-        return str(tid)
-    return str(getattr(team, "name", ""))
+def _derive_side(*, home_team_id: str, away_team_id: str, team_id: str) -> str:
+    if team_id == home_team_id:
+        return "home"
+    if team_id == away_team_id:
+        return "away"
+    raise ValueError(
+        f"emit_event(): team_id {team_id!r} is not in this game: home={home_team_id!r}, away={away_team_id!r}"
+    )
 
 
-def _ensure_team_mapping(game_state: GameState, home: TeamState, away: TeamState) -> Tuple[str, str]:
-    """
-    Ensure game_state has stable team-id mapping for this game.
-    Returns (home_team_id, away_team_id).
-    """
-    home_id = str(getattr(game_state, "home_team_id", None) or _get_team_id(home))
-    away_id = str(getattr(game_state, "away_team_id", None) or _get_team_id(away))
+def _validate_game_teams(game_state: GameState, home: TeamState, away: TeamState) -> tuple[str, str]:
+    home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
+    away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
+    if not home_team_id or not away_team_id:
+        raise ValueError(
+            f"emit_event(): GameState.home_team_id/away_team_id must be set before replay emission (home={home_team_id!r}, away={away_team_id!r})"
+        )
+    if home_team_id == away_team_id:
+        raise ValueError(
+            f"emit_event(): invalid GameState team ids (home_team_id == away_team_id == {home_team_id!r})"
+        )
 
-    # Write-through so downstream callers can rely on this.
-    game_state.home_team_id = home_id
-    game_state.away_team_id = away_id
+    # Defensive contract check: callers must pass the real home/away TeamState objects.
+    if str(getattr(home, "team_id", "") or "").strip() != home_team_id:
+        raise ValueError(
+            f"emit_event(): home TeamState.team_id mismatch: game_state.home_team_id={home_team_id!r}, home.team_id={getattr(home, 'team_id', None)!r}"
+        )
+    if str(getattr(away, "team_id", "") or "").strip() != away_team_id:
+        raise ValueError(
+            f"emit_event(): away TeamState.team_id mismatch: game_state.away_team_id={away_team_id!r}, away.team_id={getattr(away, 'team_id', None)!r}"
+        )
 
-    # Build mapping dicts if missing/incomplete.
-    st = getattr(game_state, "side_to_team_id", None)
-    if not isinstance(st, dict):
-        game_state.side_to_team_id = {}
-    tt = getattr(game_state, "team_id_to_side", None)
-    if not isinstance(tt, dict):
-        game_state.team_id_to_side = {}
-
-    game_state.side_to_team_id.setdefault("home", home_id)
-    game_state.side_to_team_id.setdefault("away", away_id)
-    game_state.team_id_to_side.setdefault(home_id, "home")
-    game_state.team_id_to_side.setdefault(away_id, "away")
-
-    return home_id, away_id
+    return home_team_id, away_team_id
 
 
 def emit_event(
@@ -175,10 +156,8 @@ def emit_event(
     home: TeamState,
     away: TeamState,
     rules: Optional[Mapping[str, Any]] = None,
-    # team mapping (either or both can be provided; emitter will fill/validate)
-    team_side: Optional[str] = None,
+    # team mapping (SSOT keys: team_id / opp_team_id only)
     team_id: Optional[str] = None,
-    opp_side: Optional[str] = None,
     opp_team_id: Optional[str] = None,
     # flow keys (optional but standardized when present)
     pos_start: Optional[str] = None,
@@ -189,8 +168,6 @@ def emit_event(
     # include on-court snapshots (for replay seeking / exact on-court reconstruction)
     # when True: emits on_court_* and lineup_version_by_team_id in a standard format
     include_lineups: bool = False,
-    # strict validation: mismatched team_side/team_id is a hard error (prevents bad logs)
-    strict: bool = True,
     **payload: Any,
 ) -> Dict[str, Any]:
     """
@@ -212,8 +189,7 @@ def emit_event(
     if bad:
         raise ValueError(f"emit_event() payload attempted to override reserved keys: {bad}")
 
-    # Ensure mapping exists (and write-through home/away ids into game_state).
-    home_team_id, away_team_id = _ensure_team_mapping(game_state, home, away)
+    home_team_id, away_team_id = _validate_game_teams(game_state, home, away)
 
     # Normalize event_type
     et = str(event_type).strip()
@@ -228,104 +204,48 @@ def emit_event(
     poss_idx = possession_index if possession_index is not None else getattr(game_state, "possession", 0)
     poss_idx_i = _safe_int(poss_idx, 0)
 
-    # Score snapshot policy (UX correctness):
-    # - Prefer authoritative TeamState.pts (updated immediately by resolve layer).
-    # - Fallback to GameState mirrors only if TeamState.pts is missing/None.
-    home_pts = getattr(home, "pts", None)
-    away_pts = getattr(away, "pts", None)
-    if home_pts is None:
-        home_pts = getattr(game_state, "score_home", 0)
-    if away_pts is None:
-        away_pts = getattr(game_state, "score_away", 0)
-    score_home = _safe_int(home_pts, 0)
-    score_away = _safe_int(away_pts, 0)
+    # Score snapshot policy (strict): TeamState.pts only (no GameState fallback).
+    score_home = _safe_int(getattr(home, "pts", 0) or 0, 0)
+    score_away = _safe_int(getattr(away, "pts", 0) or 0, 0)
 
     # seq (1..N)
     seq = _safe_int(getattr(game_state, "replay_seq", 0), 0) + 1
     game_state.replay_seq = seq
 
-    # Derive team_side/team_id/opp fields with strict validation.
     def _norm_opt_str(x: Optional[str]) -> Optional[str]:
         if x is None:
             return None
         s = str(x).strip()
         return s if s else None
 
-    ts = _norm_opt_str(team_side)
     tid = _norm_opt_str(team_id)
-    os = _norm_opt_str(opp_side)
     oid = _norm_opt_str(opp_team_id)
 
-    if ts is None and tid is None:
-        # Neutral event (period start/end etc.)
-        os = None
-        oid = None
+    ts: Optional[str] = None
+    os: Optional[str] = None
+
+    if tid is None:
+        if oid is not None:
+            raise ValueError(
+                f"emit_event(): opp_team_id provided without team_id (opp_team_id={oid!r}); home={home_team_id!r}, away={away_team_id!r}"
+            )
     else:
-        # Fill missing side/id from mapping tables
-        if ts is None and tid is not None:
-            ts = game_state.team_id_to_side.get(tid)
-            if ts is None:
-                # last-resort: compare to known home/away ids
-                if tid == home_team_id:
-                    ts = "home"
-                elif tid == away_team_id:
-                    ts = "away"
-        if tid is None and ts is not None:
-            if ts == "home":
-                tid = home_team_id
-            elif ts == "away":
-                tid = away_team_id
-            else:
-                raise ValueError(f"emit_event(): invalid team_side {ts!r}")
+        # Subject-team event: validate ids belong to this game.
+        ts = _derive_side(home_team_id=home_team_id, away_team_id=away_team_id, team_id=tid)
 
-        # Validate consistency (team_side must map to the given team_id)
-        if ts is not None:
-            expected = home_team_id if ts == "home" else away_team_id if ts == "away" else None
-            if expected is None:
-                raise ValueError(f"emit_event(): invalid team_side {ts!r}")
-            if tid is not None and tid != expected:
-                msg = (
-                    f"emit_event(): team_side/team_id mismatch: side={ts!r} expects {expected!r}, "
-                    f"got {tid!r}"
+        if oid is None:
+            oid = away_team_id if tid == home_team_id else home_team_id
+        else:
+            if oid not in (home_team_id, away_team_id):
+                raise ValueError(
+                    f"emit_event(): opp_team_id {oid!r} is not in this game: home={home_team_id!r}, away={away_team_id!r}"
                 )
-                if strict:
-                    raise ValueError(msg)
-                # Non-strict mode: force-correct to mapping.
-                tid = expected
-
-        # Opponent defaults
-        if ts is not None and os is None:
-            os = _side_other(ts)
-        if os is not None and oid is None:
-            if os == "home":
-                oid = home_team_id
-            elif os == "away":
-                oid = away_team_id
-            else:
-                raise ValueError(f"emit_event(): invalid opp_side {os!r}")
-
-        # Validate opp consistency if both provided
-        if os is not None:
-            expected_opp = home_team_id if os == "home" else away_team_id if os == "away" else None
-            if expected_opp is None:
-                raise ValueError(f"emit_event(): invalid opp_side {os!r}")
-            if oid is not None and oid != expected_opp:
-                msg = (
-                    f"emit_event(): opp_side/opp_team_id mismatch: side={os!r} expects {expected_opp!r}, "
-                    f"got {oid!r}"
+            if oid == tid:
+                raise ValueError(
+                    f"emit_event(): team_id and opp_team_id must differ (both {tid!r}); home={home_team_id!r}, away={away_team_id!r}"
                 )
-                if strict:
-                    raise ValueError(msg)
-                oid = expected_opp
 
-        # Validate that team and opp are opposite when both present
-        if ts is not None and os is not None:
-            if os == ts:
-                msg = f"emit_event(): opp_side must differ from team_side (both {ts!r})"
-                if strict:
-                    raise ValueError(msg)
-                os = _side_other(ts)
-                oid = home_team_id if os == "home" else away_team_id
+        os = _derive_side(home_team_id=home_team_id, away_team_id=away_team_id, team_id=oid)
 
     # Build event dict (final spec keys + payload passthrough)
     ge_sec = int(_compute_game_elapsed_sec(game_state, rules))
@@ -365,8 +285,8 @@ def emit_event(
 
     # Optional lineup snapshots (standard format)
     if include_lineups:
-        on_home = list(getattr(game_state, "on_court_home", []) or [])
-        on_away = list(getattr(game_state, "on_court_away", []) or [])
+        on_home = list(getattr(home, "on_court_pids", []) or [])
+        on_away = list(getattr(away, "on_court_pids", []) or [])
         evt["on_court_home"] = on_home
         evt["on_court_away"] = on_away
         evt["on_court_by_team_id"] = {home_team_id: on_home, away_team_id: on_away}
@@ -398,9 +318,6 @@ def emit_event(
 
 
 def rebuild_events_of_type(replay_events: List[Dict[str, Any]], event_type: str) -> List[Dict[str, Any]]:
-    """
-    Convenience helper for tests/tools: derive a typed log from replay_events (e.g., TIMEOUT list).
-    Not used by the engine runtime; engine must never maintain duplicate logs.
-    """
+    """Convenience helper for tests/tools; engine must never maintain duplicate logs."""
     et = str(event_type)
     return [e for e in (replay_events or []) if isinstance(e, dict) and str(e.get("event_type")) == et]
