@@ -1073,7 +1073,7 @@ def resolve_outcome(
         pts = 0
         shot_key = None
         and_one = False
-
+        foul_dbg = {}
         if outcome.startswith("FOUL_DRAW_"):
             # treat as a shooting foul tied to shot type
             # Choose which "would-be" shot was fouled (affects shot-chart + and-1 mix)
