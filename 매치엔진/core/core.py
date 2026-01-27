@@ -66,21 +66,32 @@ def make_replay_token(rng: random.Random, home: 'TeamState', away: 'TeamState', 
             'context': t.context,
         }
 
+    home_id = str(getattr(home, "team_id", "") or "").strip()
+    away_id = str(getattr(away, "team_id", "") or "").strip()
+    if not home_id or not away_id:
+        raise ValueError("make_replay_token: home/away TeamState.team_id must be set")
+    if home_id == away_id:
+        raise ValueError(f"make_replay_token: home_id == away_id == {home_id!r}")
+
     payload = {
-        'engine_version': ENGINE_VERSION,
-        'era': era,
-        'rng_state_hash': rng_hash,
-        'home': {
-            'name': home.name,
-            'roles': home.roles,
-            'lineup': [_player_payload(p) for p in home.lineup],
-            'tactics': _tactics_payload(home.tactics),
-        },
-        'away': {
-            'name': away.name,
-            'roles': away.roles,
-            'lineup': [_player_payload(p) for p in away.lineup],
-            'tactics': _tactics_payload(away.tactics),
+        "engine_version": ENGINE_VERSION,
+        "era": era,
+        "rng_state_hash": rng_hash,
+        "teams": {
+            home_id: {
+                "team_id": home_id,
+                "name": home.name,
+                "roles": home.roles,
+                "lineup": [_player_payload(p) for p in home.lineup],
+                "tactics": _tactics_payload(home.tactics),
+            },
+            away_id: {
+                "team_id": away_id,
+                "name": away.name,
+                "roles": away.roles,
+                "lineup": [_player_payload(p) for p in away.lineup],
+                "tactics": _tactics_payload(away.tactics),
+            },
         },
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
