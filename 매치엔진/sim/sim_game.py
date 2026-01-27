@@ -463,11 +463,14 @@ def simulate_game(
         if ps == "start_q" and q_index == 0 and total_possessions == 0:
             return
         try:
+            # Run substitution logic once per team (team-specific decision making).
+            # NOTE: home/away objects are passed as *real* TeamState instances (no stubs, no inference).
+
             maybe_substitute_deadball_v1(
                 rng,
-                home,
-                home,
-                away=away,
+                home,   # team
+                home,   # home
+                away,   # away
                 game_state,
                 rules,
                 q_index=int(q_index),
@@ -477,9 +480,9 @@ def simulate_game(
             )
             maybe_substitute_deadball_v1(
                 rng,
-                away,
-                home,
-                away=away,
+                away,   # team
+                home,   # home
+                away,   # away
                 game_state,
                 rules,
                 q_index=int(q_index),
