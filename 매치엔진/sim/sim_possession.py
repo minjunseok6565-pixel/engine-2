@@ -93,58 +93,80 @@ def _turnover_is_deadball(outcome: Any) -> bool:
     return False
 
 
-def _infer_home_away_for_event(
++def _validate_possession_team_ids(
     offense: TeamState,
     defense: TeamState,
     game_state: GameState,
     ctx: Dict[str, Any],
 ) -> Tuple[TeamState, TeamState, str, str]:
+        """Validate SSOT for a possession and derive (home_team, away_team, off_team_id, def_team_id).
+
+    Contract:
+    - ctx must provide off_team_id / def_team_id (team_id only; never "home"/"away").
+    - offense.team_id / defense.team_id must match those ctx ids.
+    - GameState.home_team_id / away_team_id must be set and must match the two participating team_ids.
+    - No inference / correction / fallback. Any mismatch is a hard ValueError.
     """
-    Infer (home_team, away_team, off_side, def_side) for replay logging.
-    We prefer ctx['off_team_key']/ctx['def_team_key'] which are "home"/"away" side keys.
-    """
-    off_side = str(ctx.get("off_team_key") or "").strip()
-    def_side = str(ctx.get("def_team_key") or "").strip()
+    game_id = str(ctx.get("game_id", "") or "").strip()
 
-    # Common case: ctx tells us which TeamState is home.
-    if off_side == "home":
-        # offense is home
-        return offense, defense, "home", "away"
-    if off_side == "away":
-        # offense is away
-        return defense, offense, "away", "home"
+    home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
+    away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
+    if not home_team_id or not away_team_id:
+        raise ValueError(
+            f"simulate_possession(): GameState.home_team_id/away_team_id must be set "
+            f"(game_id={game_id!r}, home={home_team_id!r}, away={away_team_id!r})"
+        )
+    if home_team_id == away_team_id:
+        raise ValueError(
+            f"simulate_possession(): invalid game team ids (home_team_id == away_team_id == {home_team_id!r}, game_id={game_id!r})"
+        )
 
-    # Fallback: compare team_id/name against GameState mapping.
-    try:
-        hid = str(getattr(game_state, "home_team_id", "") or "")
-        aid = str(getattr(game_state, "away_team_id", "") or "")
-        off_id = str(getattr(offense, "team_id", None) or getattr(offense, "name", "") or "")
-        def_id = str(getattr(defense, "team_id", None) or getattr(defense, "name", "") or "")
-        if hid and off_id == hid:
-            return offense, defense, "home", "away"
-        if hid and def_id == hid:
-            return defense, offense, "away", "home"
-        if aid and off_id == aid:
-            return defense, offense, "away", "home"
-        if aid and def_id == aid:
-            return offense, defense, "home", "away"
-    except Exception:
-        pass
+    off_team_id = str(ctx.get("off_team_id", "") or "").strip()
+    def_team_id = str(ctx.get("def_team_id", "") or "").strip()
+    if not off_team_id or not def_team_id:
+        raise ValueError(
+            f"simulate_possession(): ctx must include off_team_id/def_team_id "
+            f"(game_id={game_id!r}, off_team_id={off_team_id!r}, def_team_id={def_team_id!r})"
+        )
+    if off_team_id == def_team_id:
+        raise ValueError(
+            f"simulate_possession(): off_team_id == def_team_id == {off_team_id!r} (game_id={game_id!r})"
+        )
 
-    # Last resort: assume offense==home (ensures non-empty valid team_side for logging).
-    return offense, defense, "home", "away"
+    off_tid_obj = str(getattr(offense, "team_id", "") or "").strip()
+    def_tid_obj = str(getattr(defense, "team_id", "") or "").strip()
+    if off_tid_obj != off_team_id:
+        raise ValueError(
+            f"simulate_possession(): offense.team_id mismatch "
+            f"(game_id={game_id!r}, ctx.off_team_id={off_team_id!r}, offense.team_id={off_tid_obj!r})"
+        )
+    if def_tid_obj != def_team_id:
+        raise ValueError(
+            f"simulate_possession(): defense.team_id mismatch "
+            f"(game_id={game_id!r}, ctx.def_team_id={def_team_id!r}, defense.team_id={def_tid_obj!r})"
+        )
 
+    if {off_team_id, def_team_id} != {home_team_id, away_team_id}:
+        raise ValueError(
+            f"simulate_possession(): ctx team ids do not match game teams "
+            f"(game_id={game_id!r}, home={home_team_id!r}, away={away_team_id!r}, "
+            f"off={off_team_id!r}, def={def_team_id!r})"
+        )
 
-def _sync_scores_for_event(game_state: GameState, home: TeamState, away: TeamState) -> None:
-    """Keep GameState score mirrors consistent for event headers."""
-    try:
-        game_state.score_home = int(getattr(home, "pts", 0) or 0)
-    except Exception:
-        pass
-    try:
-        game_state.score_away = int(getattr(away, "pts", 0) or 0)
-    except Exception:
-        pass
+    # Derive actual home/away TeamState objects from GameState SSOT.
+    if off_team_id == home_team_id:
+        home_team = offense
+        away_team = defense
+    elif def_team_id == home_team_id:
+        home_team = defense
+        away_team = offense
+    else:
+        raise ValueError(
+            f"simulate_possession(): could not derive home_team from ids "
+            f"(game_id={game_id!r}, home={home_team_id!r}, off={off_team_id!r}, def={def_team_id!r})"
+        )
+
+    return home_team, away_team, off_team_id, def_team_id
 
 
 def _clean_replay_payload(payload: Any, *, drop: Optional[set] = None) -> Dict[str, Any]:
@@ -506,7 +528,7 @@ def simulate_possession(
 
     # Replay logging: infer which TeamState corresponds to home/away.
     # (We do this once per simulate_possession call; it's cheap and keeps logging consistent.)
-    home_team, away_team, off_side, def_side = _infer_home_away_for_event(offense, defense, game_state, ctx or {})
+    home_team, away_team, off_team_id, def_team_id = _validate_possession_team_ids(offense, defense, game_state, ctx or {})
 
     # Possession-continuation support:
     # Some dead-ball events (e.g. no-shot foul) can stop play and restart with the same offense.
@@ -872,14 +894,14 @@ def simulate_possession(
             commit_shot_clock_turnover(offense)
             # Replay log: shot-clock violation -> turnover (deadball)
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 emit_event(
                     game_state,
                     event_type="TURNOVER",
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=off_side,
+                    team_id=off_team_id,
+                    opp_team_id=def_team_id,
                     pos_start=str(pos_origin),
                     pos_start_next="after_tov_dead",
                     outcome="TO_SHOT_CLOCK",
@@ -936,7 +958,6 @@ def simulate_possession(
         if term == "SCORE":
             # Replay log: made shot (resolve payload contains pid/points/assist/outcome etc.)
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -944,7 +965,8 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=off_side,
+                    team_id=off_team_id,
+                    opp_team_id=def_team_id,
                     pos_start=str(pos_origin),
                     pos_start_next="after_score",
                     **rp,
@@ -1002,7 +1024,6 @@ def simulate_possession(
                 is_dead = False
             # Replay log: turnover (resolve payload contains pid/outcome/type/steal/...).
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 rp = _clean_replay_payload(payload, drop={"pos_start_next_override"})
                 emit_event(
                     game_state,
@@ -1010,7 +1031,8 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=off_side,
+                    team_id=off_team_id,
+                    opp_team_id=def_team_id,
                     pos_start=str(pos_origin),
                     pos_start_next=str(pos_start_next),
                     pos_start_next_override=pstart_override_for_log,
@@ -1038,13 +1060,6 @@ def simulate_possession(
             # The game loop may want to do substitutions / timeouts / UI stops between the whistle and inbound.
             # Replay log: foul (no shots). team_side is the fouling team (defense).
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
-                foul_side = None
-                if isinstance(payload, dict):
-                    foul_side = payload.get("fouler_team")
-                foul_side = str(foul_side or def_side).strip()
-                if foul_side not in ("home", "away"):
-                    foul_side = def_side
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -1052,7 +1067,8 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=foul_side,
+                    team_id=def_team_id,
+                    opp_team_id=off_team_id,
                     pos_start=str(pos_origin),
                     pos_start_next="after_foul",
                     **rp,
@@ -1075,13 +1091,6 @@ def simulate_possession(
             # Replay log: foul + FT trip result. team_side is the fouling team (defense).
             # (Log once here, regardless of whether last FT was made; rebound (if any) is logged separately.)
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
-                foul_side = None
-                if isinstance(payload, dict):
-                    foul_side = payload.get("fouler_team")
-                foul_side = str(foul_side or def_side).strip()
-                if foul_side not in ("home", "away"):
-                    foul_side = def_side
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -1089,7 +1098,8 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=foul_side,
+                    team_id=def_team_id,
+                    opp_team_id=off_team_id,
                     pos_start=str(pos_origin),
                     pos_start_next=("after_score" if bool(getattr(payload, "get", lambda *_: False)("last_made", False)) else None),
                     **rp,
@@ -1113,9 +1123,8 @@ def simulate_possession(
             # Before we select a rebounder, force foul-out substitutions NOW so a fouled-out player
             # cannot remain in the rebounder candidate pool.
             try:
-                def_key = str(ctx.get("def_team_key") or "")
                 foul_out = int(ctx.get("foul_out", rules.get("foul_out", 6)))
-                pf_map = (game_state.player_fouls.get(def_key, {}) or {}) if def_key else {}
+                pf_map = (game_state.player_fouls.get(def_team_id, {}) or {})
 
                 forced_out = [
                     pid for pid in list(getattr(defense, "on_court_pids", []) or [])
@@ -1123,9 +1132,6 @@ def simulate_possession(
                 ]
 
                 if forced_out:
-                    # Infer which TeamState is the "home" team for sim_rotation helpers.
-                    # ctx keys are "home"/"away" (see team_keys.py).
-                    home_team = offense if str(ctx.get("off_team_key")) == "home" else defense
 
                     maybe_substitute_deadball_v1(
                         rng,
@@ -1133,20 +1139,17 @@ def simulate_possession(
                         home_team,
                         game_state,
                         rules,
+                        away=away_team,
                         q_index=max(0, int(getattr(game_state, "quarter", 1)) - 1),
                         pos_start="after_foul",
                         pressure_index=float(ctx.get("pressure_index", 0.0)),
                         garbage_index=float(ctx.get("garbage_index", 0.0)),
                     )
 
-                    # IMPORTANT: sim_rotation updates GameState on-court lists.
-                    # Sync TeamState on-court pids so rebound selection uses the updated lineup.
-                    if def_key == "home":
-                        defense.set_on_court(list(getattr(game_state, "on_court_home", []) or []))
-                    elif def_key == "away":
-                        defense.set_on_court(list(getattr(game_state, "on_court_away", []) or []))
+            except ValueError:
+                raise
             except Exception:
-                # Forced-sub logic must never break simulation.
+                # Forced-sub logic should not break simulation, but SSOT violations must crash.
                 pass
 
             orb_mult = float(offense.tactics.context.get("ORB_MULT", 1.0)) * float(rules.get("ft_orb_mult", 0.75))
@@ -1158,14 +1161,14 @@ def simulate_possession(
                 offense.add_player_stat(rbd.pid, "ORB", 1)
                 # Replay log: offensive rebound after missed FT
                 try:
-                    _sync_scores_for_event(game_state, home_team, away_team)
                     emit_event(
                         game_state,
                         event_type="REB",
                         home=home_team,
                         away=away_team,
                         rules=rules,
-                        team_side=off_side,
+                        team_id=off_team_id,
+                        opp_team_id=def_team_id,
                         pos_start=str(pos_origin),
                         pid=getattr(rbd, "pid", None),
                         outcome="ORB",
@@ -1192,14 +1195,14 @@ def simulate_possession(
             defense.add_player_stat(rbd.pid, "DRB", 1)
             # Replay log: defensive rebound after missed FT
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 emit_event(
                     game_state,
                     event_type="REB",
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=def_side,
+                    team_id=def_team_id,
+                    opp_team_id=off_team_id,
                     pos_start=str(pos_origin),
                     pid=getattr(rbd, "pid", None),
                     outcome="DRB",
@@ -1245,7 +1248,6 @@ def simulate_possession(
                     # NBA-style: keep the remaining (unexpired) shot clock.
                     # Replay log: miss (blocked) that ends in deadball stop / inbound retain
                     try:
-                        _sync_scores_for_event(game_state, home_team, away_team)
                         rp = _clean_replay_payload(payload)
                         emit_event(
                             game_state,
@@ -1253,7 +1255,8 @@ def simulate_possession(
                             home=home_team,
                             away=away_team,
                             rules=rules,
-                            team_side=off_side,
+                            team_id=off_team_id,
+                            opp_team_id=def_team_id,
                             pos_start=str(pos_origin),
                             pos_start_next="after_block_oob",
                             deadball_reason="BLOCK_OOB",
@@ -1277,7 +1280,6 @@ def simulate_possession(
 
             # Replay log: regular miss (may lead to rebound)
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 rp = _clean_replay_payload(payload)
                 emit_event(
                     game_state,
@@ -1285,7 +1287,8 @@ def simulate_possession(
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=off_side,
+                    team_id=off_team_id,
+                    opp_team_id=def_team_id,
                     pos_start=str(pos_origin),
                     **rp,
                 )
@@ -1320,14 +1323,14 @@ def simulate_possession(
                 offense.add_player_stat(rbd.pid, "ORB", 1)
                 # Replay log: offensive rebound after miss
                 try:
-                    _sync_scores_for_event(game_state, home_team, away_team)
                     emit_event(
                         game_state,
                         event_type="REB",
                         home=home_team,
                         away=away_team,
                         rules=rules,
-                        team_side=off_side,
+                        team_id=off_team_id,
+                        opp_team_id=def_team_id,
                         pos_start=str(pos_origin),
                         pid=getattr(rbd, "pid", None),
                         outcome="ORB",
@@ -1353,14 +1356,14 @@ def simulate_possession(
             defense.add_player_stat(rbd.pid, "DRB", 1)
             # Replay log: defensive rebound after miss
             try:
-                _sync_scores_for_event(game_state, home_team, away_team)
                 emit_event(
                     game_state,
                     event_type="REB",
                     home=home_team,
                     away=away_team,
                     rules=rules,
-                    team_side=def_side,
+                    team_id=def_team_id,
+                    opp_team_id=off_team_id,
                     pos_start=str(pos_origin),
                     pid=getattr(rbd, "pid", None),
                     outcome="DRB",
@@ -1403,14 +1406,14 @@ def simulate_possession(
                     commit_shot_clock_turnover(offense)
                     # Replay log: shot-clock violation via RESET path -> turnover (deadball)
                     try:
-                        _sync_scores_for_event(game_state, home_team, away_team)
                         emit_event(
                             game_state,
                             event_type="TURNOVER",
                             home=home_team,
                             away=away_team,
                             rules=rules,
-                            team_side=str(off_side or ctx.get("off_team_key") or ""),
+                            team_id=off_team_id,
+                            opp_team_id=def_team_id,
                             pos_start=str(pos_origin),
                             pos_start_next="after_tov_dead",
                             outcome="TO_SHOT_CLOCK",
