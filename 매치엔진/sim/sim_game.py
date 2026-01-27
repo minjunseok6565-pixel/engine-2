@@ -617,7 +617,7 @@ def simulate_game(
                 home_on = list(getattr(home, "on_court_pids", []) or [])
                 away_on = list(getattr(away, "on_court_pids", []) or [])
                 home_fmap = dict(game_state.fatigue.get(home_team_id, {}) or {})
-                away_fmap = dict(game_state.fatigue.get(away_team_id, {}) or {}) {}
+                away_fmap = dict(game_state.fatigue.get(away_team_id, {}) or {})
                 avg_energy_home = sum(float(home_fmap.get(pid, 1.0)) for pid in home_on) / max(len(home_on), 1)
                 avg_energy_away = sum(float(away_fmap.get(pid, 1.0)) for pid in away_on) / max(len(away_on), 1)
                 timeout_evt = maybe_timeout_deadball(
