@@ -5,7 +5,7 @@ from __future__ import annotations
 This module controls:
 - per-player minutes tracking
 - auto-substitution / rotation decisions
-- on-court pid lists in GameState
+- on-court pid lists in TeamState (SSOT)
 
 NOTE: Split from sim.py on 2025-12-27.
 """
@@ -19,7 +19,6 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 
 from .core import clamp
 from .models import GameState, TeamState
-from .team_keys import team_key
 from .replay import emit_event
 
 
@@ -158,13 +157,15 @@ def pick_desired_five_bruteforce(
     foul_out = int(rules.get("foul_out", 6))
     q = int(getattr(game_state, "quarter", 1))
 
-    key = team_key(team, home)
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if not team_id:
+        raise ValueError("pick_desired_five_bruteforce(): TeamState.team_id is empty")
 
-    pf_map = game_state.player_fouls.get(key, {})
-    fat_map = game_state.fatigue.get(key, {})
-    mins_map = game_state.minutes_played_sec.get(key, {})
+    pf_map = game_state.player_fouls.get(team_id, {})
+    fat_map = game_state.fatigue.get(team_id, {})
+    mins_map = game_state.minutes_played_sec.get(team_id, {})
 
-    targets = game_state.targets_sec_home if team is home else game_state.targets_sec_away
+    targets = _init_targets(team, rules)
 
     player_by_pid = {p.pid: p for p in team.lineup}
 
@@ -438,7 +439,7 @@ def pick_desired_five_bruteforce(
     return list(best_lineup), debug
 
 
-def _init_targets(team: TeamState, rules: Dict[str, Any]) -> Dict[str, int]:
+def _init_targets(team: TeamState, rules: Mapping[str, Any]) -> Dict[str, int]:
     """Initialize per-player minutes targets (seconds).
 
     Priority:
@@ -490,25 +491,9 @@ def _init_targets(team: TeamState, rules: Dict[str, Any]) -> Dict[str, int]:
     return targets
 
 
-
-def _get_on_court(game_state: GameState, team: TeamState, home: TeamState) -> List[str]:
-    return game_state.on_court_home if team is home else game_state.on_court_away
-
-
-def _state_team_key(game_state: GameState, side_key: str) -> str:
-    """
-    Convert "home"/"away" side key into stable team_id for team-scoped state dicts.
-    Falls back to the side key if mapping is unavailable.
-    """
-    try:
-        st = getattr(game_state, "side_to_team_id", None)
-        if isinstance(st, dict):
-            v = st.get(str(side_key))
-            if v:
-                return str(v)
-    except Exception:
-        pass
-    return str(side_key)
+def _get_on_court(team: TeamState) -> List[str]:
+    """Return current on-court pid list (SSOT: TeamState.on_court_pids)."""
+    return list(getattr(team, "on_court_pids", []) or [])
 
 
 def _emit_substitution(
@@ -516,6 +501,7 @@ def _emit_substitution(
     game_state: GameState,
     rules: Mapping[str, Any],
     home: TeamState,
+    away: TeamState,
     team: TeamState,
     pos_start: str,
     reason: str,
@@ -524,35 +510,45 @@ def _emit_substitution(
     lineup_version_before: Optional[int] = None,
     lineup_version_after: Optional[int] = None,
 ) -> None:
-    """
-    Emit a single SUBSTITUTION replay event for a team based on on-court diff.
-    (단일 기록 원칙: 교체 사건은 여기서만 1회 emit)
+    """Emit a single SUBSTITUTION replay event for a team based on on-court diff.
+
+    Contract:
+    - SSOT lineup is TeamState.on_court_pids (GameState does not mirror home/away lists).
+    - Replay emission is keyed by team_id / opp_team_id only (no side-based APIs).
+    - home/away passed here must be the real TeamState objects for this game.
     """
     before_set = set(before_on or [])
     after_set = set(after_on or [])
     if before_set == after_set:
         return
 
+    home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
+    away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
+    if not home_team_id or not away_team_id:
+        raise ValueError(
+            f"_emit_substitution(): GameState.home_team_id/away_team_id must be set (home={home_team_id!r}, away={away_team_id!r})"
+        )
+    if home_team_id == away_team_id:
+        raise ValueError(f"_emit_substitution(): invalid game team ids (both {home_team_id!r})")
+
+    if str(getattr(home, "team_id", "") or "").strip() != home_team_id:
+        raise ValueError(
+            f"_emit_substitution(): home TeamState.team_id mismatch: game_state.home_team_id={home_team_id!r}, home.team_id={getattr(home, 'team_id', None)!r}"
+        )
+    if str(getattr(away, "team_id", "") or "").strip() != away_team_id:
+        raise ValueError(
+            f"_emit_substitution(): away TeamState.team_id mismatch: game_state.away_team_id={away_team_id!r}, away.team_id={getattr(away, 'team_id', None)!r}"
+        )
+
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if team_id not in (home_team_id, away_team_id):
+        raise ValueError(
+            f"_emit_substitution(): team.team_id not in this game: team_id={team_id!r}, home={home_team_id!r}, away={away_team_id!r}"
+        )
+    opp_team_id = away_team_id if team_id == home_team_id else home_team_id
+
     sub_out = sorted(list(before_set - after_set))
     sub_in = sorted(list(after_set - before_set))
-
-    # Determine team_side (subject team) for the event.
-    side = str(team_key(team, home))
-
-    # We might not always have the true away TeamState in this module call-path.
-    # - If team != home, team is almost certainly the away team -> use it.
-    # - If team == home, build a minimal away stub from game_state mapping/scores.
-    away_for_event: Any = team if team is not home else None
-    if away_for_event is None:
-        class _TeamStub:
-            def __init__(self, name: str, pts: int):
-                self.name = name
-                self.team_id = name
-                self.pts = int(pts)
-
-        away_id = str(getattr(game_state, "away_team_id", None) or "AWAY")
-        away_pts = int(getattr(game_state, "score_away", 0) or 0)
-        away_for_event = _TeamStub(away_id, away_pts)
 
     extra: Dict[str, Any] = {
         "sub_out_pids": sub_out,
@@ -576,9 +572,10 @@ def _emit_substitution(
         game_state,
         event_type="SUBSTITUTION",
         home=home,
-        away=away_for_event,
+        away=away,
         rules=rules,
-        team_side=side,
+        team_id=team_id,
+        opp_team_id=opp_team_id,
         pos_start=str(pos_start),
         include_lineups=True,
         **extra,
@@ -588,37 +585,23 @@ def _emit_substitution(
 def _set_on_court(
     game_state: GameState,
     team: TeamState,
-    home: TeamState,
     players: List[str],
     *,
     bump_version: bool = True,
 ) -> None:
+    """Update TeamState on-court pids (SSOT) and bump lineup version counters.
+
+    GameState does NOT store on_court_home/away lists. All lineup state lives on TeamState.
     """
-    Update TeamState on-court pids and mirror them into GameState.
+    before_on = list(getattr(team, "on_court_pids", []) or [])
+    before_set = set(before_on)
 
-    If bump_version=True and the on-court set actually changes, increments:
-    - game_state.lineup_version (global)
-    - game_state.lineup_version_by_team_id[team_id] (team-scoped)
-
-    NOTE: "team_id" is derived via team_key(team, home) -> _state_team_key(...)
-    so state is stable even when side keys ("home"/"away") are used elsewhere.
-    """
-    # Snapshot current on-court (from GameState, not TeamState) for change detection.
-    before_on = list(game_state.on_court_home if team is home else game_state.on_court_away)
-    before_set = set(before_on or [])
-
-    # Apply to team and mirror into GameState.
     team.set_on_court(list(players))
-    after_on = list(team.on_court_pids)
-    if team is home:
-        game_state.on_court_home = list(after_on)
-    else:
-        game_state.on_court_away = list(after_on)
+    after_on = list(getattr(team, "on_court_pids", []) or [])
+    after_set = set(after_on)
 
-    # Version bump only when the on-court set actually changes.
     if not bump_version:
         return
-    after_set = set(after_on or [])
     if before_set == after_set:
         return
 
@@ -629,9 +612,10 @@ def _set_on_court(
         lv = 0
     game_state.lineup_version = int(lv) + 1
 
-    # Team-scoped version (keyed by stable team_id when available)
-    side = str(team_key(team, home))
-    team_id = _state_team_key(game_state, side)
+    # Team-scoped version (keyed by team_id only)
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if not team_id:
+        raise ValueError("_set_on_court(): TeamState.team_id is empty")
     lvt = getattr(game_state, "lineup_version_by_team_id", None)
     if not isinstance(lvt, dict):
         lvt = {}
@@ -640,7 +624,7 @@ def _set_on_court(
         tlv = int(lvt.get(team_id, 0) or 0)
     except Exception:
         tlv = 0
-    lvt[str(team_id)] = int(tlv) + 1
+    lvt[team_id] = int(tlv) + 1
 
 
 def _update_minutes(
@@ -650,14 +634,18 @@ def _update_minutes(
     team: TeamState,
     home: TeamState,
 ) -> None:
-    # Track seconds with sub-second precision to avoid systematic undercount
-    # when segment lengths are fractional (e.g., 3.2s, 2.6s, ...).
+    """Accumulate played seconds for on-court players (team_id keyed).
+
+    `home` is kept for legacy callsites but is NOT used for mapping.
+    """
     inc = float(max(delta_sec, 0.0))
-    side = team_key(team, home)
-    key = _state_team_key(game_state, str(side))
-    mins_map = game_state.minutes_played_sec.setdefault(key, {})
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if not team_id:
+        raise ValueError("_update_minutes(): TeamState.team_id is empty")
+
+    mins_map = game_state.minutes_played_sec.setdefault(team_id, {})
     for pid in pids:
-        mins_map[pid] = float(mins_map.get(pid, 0.0)) + inc
+        mins_map[str(pid)] = float(mins_map.get(str(pid), 0.0)) + inc
         
 
 # -------------------------
@@ -907,6 +895,7 @@ def _player_score_v1(
     *,
     team: TeamState,
     home: TeamState,
+    away: Optional[TeamState] = None,
     game_state: GameState,
     rules: Mapping[str, Any],
     mode: str,
@@ -917,14 +906,17 @@ def _player_score_v1(
     w_foul: float = 0.70,
 ) -> float:
     """Same core scoring ingredients as pick_desired_five_bruteforce (for swap-cap selection)."""
-    key = team_key(team, home)
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if not team_id:
+        raise ValueError("_player_score_v1(): TeamState.team_id is empty")
+
     foul_out = int(rules.get("foul_out", 6))
     q = int(getattr(game_state, "quarter", 1))
 
-    pf_map = game_state.player_fouls.get(key, {})
-    fat_map = game_state.fatigue.get(key, {})
-    mins_map = game_state.minutes_played_sec.get(key, {})
-    targets = game_state.targets_sec_home if team is home else game_state.targets_sec_away
+    pf_map = game_state.player_fouls.get(team_id, {})
+    fat_map = game_state.fatigue.get(team_id, {})
+    mins_map = game_state.minutes_played_sec.get(team_id, {})
+    targets = _init_targets(team, rules)
 
     player_by_pid = {p.pid: p for p in team.lineup}
 
@@ -986,13 +978,14 @@ def ensure_rotation_v1_state(game_state: GameState, home: TeamState, away: TeamS
     now = _game_elapsed_sec(game_state, rules)
 
     for team in (home, away):
-        side = str(team_key(team, home))
-        k = _state_team_key(game_state, side)
-        _ensure_rotation_team_state(game_state, k, quarter=q)
+        team_id = str(getattr(team, "team_id", "") or "").strip()
+        if not team_id:
+            raise ValueError("ensure_rotation_v1_state(): TeamState.team_id is empty")
+        _ensure_rotation_team_state(game_state, team_id, quarter=q)
 
         # If on-court already populated, initialize last-in timestamps for those pids.
-        last_in = game_state.rotation_last_in_game_sec.setdefault(k, {})
-        on_court = list(_get_on_court(game_state, team, home))
+        last_in = game_state.rotation_last_in_game_sec.setdefault(team_id, {})
+        on_court = list(_get_on_court(team))
         for pid in on_court:
             last_in.setdefault(str(pid), int(now))
 
@@ -1023,15 +1016,45 @@ def maybe_substitute_deadball_v1(
     q = int(getattr(game_state, "quarter", 1))
     now = _game_elapsed_sec(game_state, rules)
 
-    side = str(team_key(team, home))
-    key = _state_team_key(game_state, side)
+    if away is None:
+        raise ValueError(
+            "maybe_substitute_deadball_v1(): away TeamState is required (no stubs / no inference; pass the real away team)"
+        )
+
+    home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
+    away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
+    if not home_team_id or not away_team_id:
+        raise ValueError(
+            f"maybe_substitute_deadball_v1(): GameState.home_team_id/away_team_id must be set (home={home_team_id!r}, away={away_team_id!r})"
+        )
+    if home_team_id == away_team_id:
+        raise ValueError(f"maybe_substitute_deadball_v1(): invalid game team ids (both {home_team_id!r})")
+
+    if str(getattr(home, "team_id", "") or "").strip() != home_team_id:
+        raise ValueError(
+            f"maybe_substitute_deadball_v1(): home TeamState.team_id mismatch: game_state.home_team_id={home_team_id!r}, home.team_id={getattr(home, 'team_id', None)!r}"
+        )
+    if str(getattr(away, "team_id", "") or "").strip() != away_team_id:
+        raise ValueError(
+            f"maybe_substitute_deadball_v1(): away TeamState.team_id mismatch: game_state.away_team_id={away_team_id!r}, away.team_id={getattr(away, 'team_id', None)!r}"
+        )
+
+    team_id = str(getattr(team, "team_id", "") or "").strip()
+    if not team_id:
+        raise ValueError("maybe_substitute_deadball_v1(): TeamState.team_id is empty")
+    if team_id not in (home_team_id, away_team_id):
+        raise ValueError(
+            f"maybe_substitute_deadball_v1(): team.team_id not in this game: team_id={team_id!r}, home={home_team_id!r}, away={away_team_id!r}"
+        )
+
+    key = team_id
     _ensure_rotation_team_state(game_state, key, quarter=q)
 
     foul_out = int(rules.get("foul_out", 6))
     pf_map = game_state.player_fouls.get(key, {})
     fat_map = game_state.fatigue.get(key, {})
 
-    on_court = list(_get_on_court(game_state, team, home))
+    on_court = list(_get_on_court(team))
     current_set = set(on_court)
     roster_set = _coerce_roster_pid_set(team)
 
@@ -1105,23 +1128,20 @@ def maybe_substitute_deadball_v1(
         if desired_set != current_set:
             before = list(on_court)
             lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
-            _set_on_court(game_state, team, home, list(desired5))
+            _set_on_court(game_state, team, list(desired5))
             lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
                 if pid not in current_set:
                     last_in[str(pid)] = int(now)
-            after = list(_get_on_court(game_state, team, home))
-            try:
-                _emit_substitution(
-                    game_state=game_state, rules=rules, home=home, team=team,
-                    pos_start=pos_start, reason="FOUL_OUT",
-                    before_on=before, after_on=after,
-                    lineup_version_before=lv_before, lineup_version_after=lv_after
-                )
-            except Exception:
-                pass
+            after = list(_get_on_court(team))
+            _emit_substitution(
+                game_state=game_state, rules=rules, home=home, away=away, team=team,
+                pos_start=pos_start, reason="FOUL_OUT",
+                before_on=before, after_on=after,
+                lineup_version_before=lv_before, lineup_version_after=lv_after
+            )
             return True
 
     # -------------------------
@@ -1148,23 +1168,20 @@ def maybe_substitute_deadball_v1(
         if desired_set != current_set:
             before = list(on_court)
             lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
-            _set_on_court(game_state, team, home, list(desired5))
+            _set_on_court(game_state, team, list(desired5))
             lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
             game_state.rotation_last_sub_game_sec[key] = int(now)
             last_in = game_state.rotation_last_in_game_sec.setdefault(key, {})
             for pid in desired5:
                 if pid not in current_set:
                     last_in[str(pid)] = int(now)
-            after = list(_get_on_court(game_state, team, home))
-            try:
-                _emit_substitution(
-                    game_state=game_state, rules=rules, home=home, team=team,
-                    pos_start=pos_start, reason="FATIGUE_EMERGENCY",
-                    before_on=before, after_on=after,
-                    lineup_version_before=lv_before, lineup_version_after=lv_after
-                )
-            except Exception:
-                pass
+            after = list(_get_on_court(team))
+            _emit_substitution(
+                game_state=game_state, rules=rules, home=home, away=away, team=team,
+                pos_start=pos_start, reason="FATIGUE_EMERGENCY",
+                before_on=before, after_on=after,
+                lineup_version_before=lv_before, lineup_version_after=lv_after
+            )
             return True
 
     # -------------------------
@@ -1310,7 +1327,7 @@ def maybe_substitute_deadball_v1(
     prev_set = set(on_court)
     before = list(on_court)
     lv_before = int(getattr(game_state, "lineup_version", 0) or 0)
-    _set_on_court(game_state, team, home, list(new_on_court)[:5])
+    _set_on_court(game_state, team, list(new_on_court)[:5])
     lv_after = int(getattr(game_state, "lineup_version", 0) or 0)
     game_state.rotation_last_sub_game_sec[key] = int(now)
 
@@ -1319,14 +1336,18 @@ def maybe_substitute_deadball_v1(
         if pid not in prev_set:
             last_in[str(pid)] = int(now)
 
-    after = list(_get_on_court(game_state, team, home))
-    try:
-        _emit_substitution(
-            game_state=game_state, rules=rules, home=home, team=team,
-            pos_start=pos_start, reason="PLANNED",
-            before_on=before, after_on=after,
-            lineup_version_before=lv_before, lineup_version_after=lv_after
-        )
-    except Exception:
-        pass
+    after = list(_get_on_court(team))
+    _emit_substitution(
+        game_state=game_state,
+        rules=rules,
+        home=home,
+        away=away,
+        team=team,
+        pos_start=pos_start,
+        reason="PLANNED",
+        before_on=before,
+        after_on=after,
+        lineup_version_before=lv_before,
+        lineup_version_after=lv_after,
+    )
     return True
