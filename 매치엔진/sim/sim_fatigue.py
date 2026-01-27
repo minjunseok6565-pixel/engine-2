@@ -8,24 +8,6 @@ NOTE: Split from sim.py on 2025-12-27.
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .models import GameState, TeamState
-from .team_keys import team_key
-from .team_keys import HOME, AWAY
-
-
-def _state_team_key(game_state: GameState, side_or_team_id: str) -> str:
-    """
-    Convert a side key ("home"/"away") into stable team_id using game_state.side_to_team_id.
-    Falls back to input key if mapping is unavailable.
-    """
-    try:
-        st = getattr(game_state, "side_to_team_id", None)
-        if isinstance(st, dict):
-            v = st.get(str(side_or_team_id))
-            if v:
-                return str(v)
-    except Exception:
-        pass
-    return str(side_or_team_id)
 
 
 # Prefer to reuse the same role->group mapping as sim_rotation (keeps rotation + fatigue consistent).
@@ -160,7 +142,7 @@ def _apply_fatigue_loss(
     rules: Dict[str, Any],
     intensity: Dict[str, bool],
     elapsed_sec: float,  # ★ 추가: 실제 흘러간 시간(초)
-    home: TeamState,
+    home: TeamState,  # legacy callsites may pass this; NOT used for mapping (SSOT is team.team_id)
 ) -> None:
     if elapsed_sec <= 0:
         return
@@ -193,9 +175,11 @@ def _apply_fatigue_loss(
 
     # --- on-court: 소모 ---
     role_by_pid = _get_offense_role_by_pid(team)
-    side = str(team_key(team, home))
-    key = _state_team_key(game_state, side)
-    fat_map = game_state.fatigue.setdefault(key, {})
+    tid = str(getattr(team, "team_id", "") or "").strip()
+    if not tid:
+        raise ValueError("_apply_fatigue_loss(): TeamState.team_id is empty")
+    # Engine-internal fatigue dict keys are team_id only (no 'home'/'away', no side mapping).
+    fat_map = game_state.fatigue.setdefault(tid, {})
 
     for pid in on_court:
         # Use configured offensive roles if available; otherwise fallback to legacy role+position heuristics.
@@ -227,7 +211,7 @@ def _apply_break_recovery(
     game_state: GameState,
     rules: Dict[str, Any],
     break_sec: float,
-    home: TeamState,
+    home: TeamState,  # legacy callsites may pass this; NOT used for mapping (SSOT is team.team_id)
 ) -> None:
     """Recover fatigue during period/OT breaks. No clock/minutes are consumed."""
     if break_sec <= 0:
@@ -254,9 +238,11 @@ def _apply_break_recovery(
     br = rules.get("break_recovery", {}) or {}
     on_per_sec = float(br.get("on_court_per_sec", 0.0010))
     bench_per_sec = float(br.get("bench_per_sec", 0.0016))
-    side = str(team_key(team, home))
-    key = _state_team_key(game_state, side)
-    fat_map = game_state.fatigue.setdefault(key, {})
+    tid = str(getattr(team, "team_id", "") or "").strip()
+    if not tid:
+        raise ValueError("_apply_break_recovery(): TeamState.team_id is empty")
+    # Engine-internal fatigue dict keys are team_id only (no 'home'/'away', no side mapping).
+    fat_map = game_state.fatigue.setdefault(tid, {})
 
     # on-court players recover
     for pid in on_court:
