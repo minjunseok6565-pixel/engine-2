@@ -102,25 +102,17 @@ DERIVED_DEFAULT = 50.0
 
 @dataclass
 class GameState:
-    # Core clock/score context (current quarter remaining seconds).
+    # Core clock context (current quarter remaining seconds).
     quarter: int
     clock_sec: float
     shot_clock_sec: float
-    score_home: int
-    score_away: int
+
+    # Fixed team ids for this game (SSOT is external GameContext; GameState stores ids only).
+    home_team_id: str
+    away_team_id: str
 
     # Possession counter (monotonic, increments per possession)
     possession: int = 0
-
-    # ---------------------------------------------------------------------
-    # Team identity mapping (fixed for the game; initialized in sim_game.py)
-    # ---------------------------------------------------------------------
-    # NOTE: Engine internals may still compute using "home"/"away" side labels,
-    # but all team-keyed *state* dicts are standardized on team_id.
-    home_team_id: Optional[str] = None
-    away_team_id: Optional[str] = None
-    side_to_team_id: Dict[str, str] = field(default_factory=dict)   # {"home": "LAL", "away": "BOS"}
-    team_id_to_side: Dict[str, str] = field(default_factory=dict)   # {"LAL": "home", "BOS": "away"}
 
     # ---------------------------------------------------------------------
     # Replay / Play-by-play (single source of truth)
@@ -140,12 +132,6 @@ class GameState:
     minutes_played_sec: Dict[str, Dict[str, float]] = field(default_factory=dict)  # {team_id: {pid: sec}}
     fatigue: Dict[str, Dict[str, float]] = field(default_factory=dict)             # {team_id: {pid: energy}}
 
-    # On-court snapshots (side-oriented; used for rotation/sub windows and validation)
-    on_court_home: List[str] = field(default_factory=list)
-    on_court_away: List[str] = field(default_factory=list)
-    targets_sec_home: Dict[str, int] = field(default_factory=dict)
-    targets_sec_away: Dict[str, int] = field(default_factory=dict)
-
     # Lineup versioning (for replay seeking / exact on-court reconstruction)
     # - lineup_version: global monotonic counter for any on-court change (both teams)
     # - lineup_version_by_team_id: per-team monotonic counter (useful when both teams sub in same stoppage)
@@ -160,10 +146,10 @@ class GameState:
 
     # --- Flow trackers for timeout AI ---
     # Run is tracked as "consecutive scoring points by the same team" (no opponent score in between).
-    run_pts_by_scoring_side: Dict[str, int] = field(default_factory=dict)   # {team_id: run_pts}
+    run_pts: Dict[str, int] = field(default_factory=dict)                   # {team_id: run_pts}
     # Consecutive team turnovers tracked per team possessions (only updates when that team is on offense).
     consecutive_team_tos: Dict[str, int] = field(default_factory=dict)       # {team_id: n}
-    last_scoring_side: Optional[str] = None
+    last_scoring_team_id: Optional[str] = None
 
     # --- Substitution system (rotation v1.0) ---
     # Smoothed indices (EMA) + dominant mode/levels (hysteresis)
@@ -202,13 +188,18 @@ class Player:
 
 @dataclass
 class TeamState:
+    # Stable SSOT identifier (required). Never fall back to name.
+    team_id: str
     name: str
     lineup: List[Player]
     roles: Dict[str, str]  # role -> pid (chosen via UI)
     tactics: "TacticsConfig"
-    # Stable identifier used for persistence/UI. When None, `name` is treated as team_id.
-    team_id: Optional[str] = None
     on_court_pids: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Strong contract: engine must be able to key all team-scoped dicts by team_id.
+        if not str(self.team_id).strip():
+            raise ValueError("TeamState.team_id is empty")
 
 
     # -------------------------
