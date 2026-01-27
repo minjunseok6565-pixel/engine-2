@@ -994,6 +994,7 @@ def maybe_substitute_deadball_v1(
     rng: random.Random,
     team: TeamState,
     home: TeamState,
+    away: TeamState,
     game_state: GameState,
     rules: Mapping[str, Any],
     *,
@@ -1017,9 +1018,7 @@ def maybe_substitute_deadball_v1(
     now = _game_elapsed_sec(game_state, rules)
 
     if away is None:
-        raise ValueError(
-            "maybe_substitute_deadball_v1(): away TeamState is required (no stubs / no inference; pass the real away team)"
-        )
+        raise ValueError("maybe_substitute_deadball_v1(): away TeamState is required (no stubs / no inference)")
 
     home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
     away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
