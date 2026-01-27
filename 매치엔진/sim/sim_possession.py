@@ -93,7 +93,7 @@ def _turnover_is_deadball(outcome: Any) -> bool:
     return False
 
 
-+def _validate_possession_team_ids(
+def _validate_possession_team_ids(
     offense: TeamState,
     defense: TeamState,
     game_state: GameState,
