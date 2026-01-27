@@ -759,8 +759,8 @@ def resolve_outcome(
             q_score = 0.0
 
                 # Threshold buckets (score in [-2.5, +2.5])
-        t_to = float(ctx.get("pass_q_to", -1.5))
-        t_reset = float(ctx.get("pass_q_reset", -0.7))
+        t_to = float(ctx.get("pass_q_to", -0.9))
+        t_reset = float(ctx.get("pass_q_reset", -0.3))
         t_neg = float(ctx.get("pass_q_neg", -0.2))
         t_pos = float(ctx.get("pass_q_pos", 0.2))
 
