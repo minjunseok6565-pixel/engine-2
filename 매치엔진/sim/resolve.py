@@ -377,12 +377,6 @@ def resolve_outcome(
             f"resolve_outcome(): offense.team_id == defense.team_id == {off_team_id!r} (game_id={game_id!r})"
         )
 
-    # Explicitly reject legacy side-key hints if they appear.
-    if "off_team_key" in ctx or "def_team_key" in ctx:
-        raise ValueError(
-            f"resolve_outcome(): legacy ctx keys are not allowed (game_id={game_id!r}, keys={[k for k in (\"off_team_key\",\"def_team_key\") if k in ctx]!r})"
-        )
-
     ctx_off = str(ctx.get("off_team_id", "") or "").strip()
     ctx_def = str(ctx.get("def_team_id", "") or "").strip()
     if ctx_off and ctx_off != off_team_id:
