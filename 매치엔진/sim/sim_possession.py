@@ -171,14 +171,14 @@ def _validate_possession_team_ids(
 
 def _clean_replay_payload(payload: Any, *, drop: Optional[set] = None) -> Dict[str, Any]:
     """
-    Avoid re-introducing legacy/non-standard keys into replay_events.
-    - resolve.py payload includes 'team'/'fouler_team' side hints: we use them for routing, but do NOT store them.
+    Replay payload sanitizer.
+
+    resolve.py returns simulation payloads that may include internal control keys.
+    This helper ensures we never forward keys that would collide with emit_event()'s explicit params.
     """
     if not isinstance(payload, dict):
         return {}
     out = dict(payload)
-    out.pop("team", None)
-    out.pop("fouler_team", None)
     if drop:
         for k in drop:
             out.pop(k, None)
