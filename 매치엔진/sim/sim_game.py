@@ -848,8 +848,6 @@ def simulate_game(
                 "fatigue_map": off_fatigue_map,
                 "def_on_court": def_on_court,
                 "off_on_court": off_on_court,
-                "team_fouls": game_state.team_fouls,
-                "player_fouls_by_team": game_state.player_fouls,
                 "foul_out": int(rules.get("foul_out", 6)),
                 "bonus_threshold": bonus_threshold,
                 "pos_start": pos_start,
