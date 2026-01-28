@@ -1089,6 +1089,7 @@ def resolve_outcome(
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
         # Update team fouls (defense committed the foul).
         team_fouls[def_team_id] = int(team_fouls[def_team_id]) + 1
+        in_bonus = bool(team_fouls[def_team_id] >= bonus_threshold)
         # Non-shooting foul becomes dead-ball unless in bonus.
 
         # Non-shooting foul (reach/trap) becomes dead-ball unless in bonus.
