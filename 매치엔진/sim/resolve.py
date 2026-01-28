@@ -358,27 +358,59 @@ def resolve_outcome(
     # count outcome
     offense.outcome_counts[outcome] = offense.outcome_counts.get(outcome, 0) + 1
 
-    if ctx is None:
-        ctx = {}
+    if not isinstance(ctx, dict):
+        raise ValueError("resolve_outcome requires ctx dict")
+    if game_state is None:
+        raise ValueError("resolve_outcome requires game_state")
     if game_cfg is None:
         raise ValueError("resolve_outcome requires game_cfg")
 
-    off_team_key = str(ctx.get("off_team_key") or "")
-    def_team_key = str(ctx.get("def_team_key") or "")
+    # SSOT / team_id-only contract (no legacy keys; no inference/repair here).
+    game_id = ctx.get("game_id")
 
-    def _with_team(payload: Dict[str, Any], include_fouler: bool = False) -> Dict[str, Any]:
-        if off_team_key:
-            payload.setdefault("team", off_team_key)
-        if include_fouler and def_team_key:
-            payload.setdefault("fouler_team", def_team_key)
-        return payload
+    if "off_team_key" in ctx or "def_team_key" in ctx:
+        raise ValueError(
+            "resolve_outcome(): legacy ctx keys are not allowed "
+            f"(game_id={game_id!r}, has_off_team_key={'off_team_key' in ctx}, has_def_team_key={'def_team_key' in ctx})"
+        )
+
+    off_team_id = str(ctx.get("off_team_id", "") or "").strip()
+    def_team_id = str(ctx.get("def_team_id", "") or "").strip()
+    if not off_team_id or not def_team_id:
+        raise ValueError(
+            "resolve_outcome(): ctx must include off_team_id/def_team_id "
+            f"(game_id={game_id!r}, off_team_id={off_team_id!r}, def_team_id={def_team_id!r})"
+        )
+    if off_team_id == def_team_id:
+        raise ValueError(
+            "resolve_outcome(): off_team_id == def_team_id "
+            f"(game_id={game_id!r}, team_id={off_team_id!r})"
+        )
+
+    off_tid_obj = str(getattr(offense, "team_id", "") or "").strip()
+    def_tid_obj = str(getattr(defense, "team_id", "") or "").strip()
+    if off_tid_obj != off_team_id or def_tid_obj != def_team_id:
+        raise ValueError(
+            "resolve_outcome(): ctx team ids do not match TeamState.team_id "
+            f"(game_id={game_id!r}, ctx.off_team_id={off_team_id!r}, offense.team_id={off_tid_obj!r}, "
+            f"ctx.def_team_id={def_team_id!r}, defense.team_id={def_tid_obj!r})"
+        )
+
+    home_team_id = str(getattr(game_state, "home_team_id", "") or "").strip()
+    away_team_id = str(getattr(game_state, "away_team_id", "") or "").strip()
+    if {off_team_id, def_team_id} != {home_team_id, away_team_id}:
+        raise ValueError(
+            "resolve_outcome(): off/def team_id not in {home,away} SSOT "
+            f"(game_id={game_id!r}, home_team_id={home_team_id!r}, away_team_id={away_team_id!r}, "
+            f"off_team_id={off_team_id!r}, def_team_id={def_team_id!r})"
+        )
 
     if outcome == "TO_SHOT_CLOCK":
         clear_pass_tracking(ctx)
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
+        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
 
     def _record_exception(where: str, exc: BaseException) -> None:
         """Record exceptions into ctx for debugging without breaking sim flow."""
@@ -636,7 +668,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "SCORE", _with_team({
+            return "SCORE", {
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -644,7 +676,7 @@ def resolve_outcome(
                 "assisted": assisted,
                 "assister_pid": assister_pid,
                 **shot_dbg,
-            })
+            }
         else:
             payload = {
                 "outcome": outcome,
@@ -703,7 +735,7 @@ def resolve_outcome(
                 _record_exception("block_model", e)
                 
             clear_pass_tracking(ctx)
-            return "MISS", _with_team(payload)
+            return "MISS", payload
 
 
     if is_pass(outcome):
@@ -839,7 +871,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "TURNOVER", _with_team(payload)
+            return "TURNOVER", payload
 
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
@@ -1031,13 +1063,28 @@ def resolve_outcome(
             except Exception as e:
                 _record_exception("steal_split_to", e)
 
-        return "TURNOVER", _with_team(payload)
+        return "TURNOVER", payload
 
     if is_foul(outcome):
         fouler_pid = None
-        team_fouls = ctx.get("team_fouls") or {}
-        player_fouls_by_team = ctx.get("player_fouls_by_team") or {}
-        pf = player_fouls_by_team.setdefault(def_team_key, {})
+        team_fouls = game_state.team_fouls
+        player_fouls_by_team = game_state.player_fouls
+        if def_team_id not in team_fouls:
+            raise ValueError(
+                "resolve_outcome(): missing team_fouls bucket for def_team_id "
+                f"(game_id={game_id!r}, def_team_id={def_team_id!r}, keys={list(team_fouls.keys())!r})"
+            )
+        if def_team_id not in player_fouls_by_team:
+            raise ValueError(
+                "resolve_outcome(): missing player_fouls bucket for def_team_id "
+                f"(game_id={game_id!r}, def_team_id={def_team_id!r}, keys={list(player_fouls_by_team.keys())!r})"
+            )
+        if def_team_id not in game_state.fatigue:
+            raise ValueError(
+                "resolve_outcome(): missing fatigue bucket for def_team_id "
+                f"(game_id={game_id!r}, def_team_id={def_team_id!r}, keys={list(game_state.fatigue.keys())!r})"
+            )
+        pf = player_fouls_by_team[def_team_id]
         foul_out_limit = int(ctx.get("foul_out", 6))
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
         def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
@@ -1047,26 +1094,18 @@ def resolve_outcome(
             fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
-                if game_state is not None:
-                    game_state.player_fouls.setdefault(def_team_key, {})[fouler_pid] = pf[fouler_pid]
 
         # update team fouls
-        team_fouls[def_team_key] = team_fouls.get(def_team_key, 0) + 1
-        if game_state is not None:
-            game_state.team_fouls[def_team_key] = team_fouls[def_team_key]
+        team_fouls[def_team_id] = int(team_fouls[def_team_id]) + 1
 
-        in_bonus = bool(team_fouls.get(def_team_key, 0) >= bonus_threshold)
+        in_bonus = bool(int(team_fouls[def_team_id]) >= bonus_threshold)
 
         # Non-shooting foul (reach/trap) becomes dead-ball unless in bonus.
         if outcome == "FOUL_REACH_TRAP" and not in_bonus:
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
-                if game_state is not None:
-                    game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+                game_state.fatigue[def_team_id][fouler_pid] = 0.0
             clear_pass_tracking(ctx)
-            return "FOUL_NO_SHOTS", _with_team(
-                {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False},
-                include_fouler=True,
-            )
+            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
@@ -1246,8 +1285,7 @@ def resolve_outcome(
         ft_res = resolve_free_throws(rng, actor, nfts, offense, game_cfg=game_cfg)
 
         if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
-            if game_state is not None:
-                game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+            game_state.fatigue[def_team_id][fouler_pid] = 0.0
 
         payload = {
             "outcome": outcome,
@@ -1264,7 +1302,7 @@ def resolve_outcome(
         if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
         clear_pass_tracking(ctx)
-        return "FOUL_FT", _with_team(payload, include_fouler=True)
+        return "FOUL_FT", payload
 
 
     if is_reset(outcome):
