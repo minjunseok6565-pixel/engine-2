@@ -99,7 +99,7 @@ def _validate_possession_team_ids(
     game_state: GameState,
     ctx: Dict[str, Any],
 ) -> Tuple[TeamState, TeamState, str, str]:
-        """Validate SSOT for a possession and derive (home_team, away_team, off_team_id, def_team_id).
+    """Validate SSOT for a possession and derive (home_team, away_team, off_team_id, def_team_id).
 
     Contract:
     - ctx must provide off_team_id / def_team_id (team_id only; never "home"/"away").
