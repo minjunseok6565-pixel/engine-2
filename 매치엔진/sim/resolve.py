@@ -996,7 +996,7 @@ def resolve_outcome(
                 {
                     "offensive_foul": True,
                     "foul_type": "CHARGE",
-                    "foul_pid": actor.pid,
+                    "fouler": actor.pid,
                     "team_foul": True,
                     "player_fouls": int(pf.get(actor.pid, 0)),
                     "team_fouls": int(team_fouls[off_team_id]),
