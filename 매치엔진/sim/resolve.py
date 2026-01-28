@@ -963,6 +963,49 @@ def resolve_outcome(
         
         payload: Dict[str, Any] = {"outcome": outcome, "pid": actor.pid}
 
+        if outcome == "TO_CHARGE":
+            # Offensive foul (charge): count as a turnover AND an offensive personal/team foul.
+            team_fouls = game_state.team_fouls
+            player_fouls_by_team = game_state.player_fouls
+            if off_team_id not in team_fouls:
+                raise ValueError(
+                    "resolve_outcome(): missing team_fouls bucket for off_team_id "
+                    f"(game_id={game_id!r}, off_team_id={off_team_id!r}, keys={list(team_fouls.keys())!r})"
+                )
+            if off_team_id not in player_fouls_by_team:
+                raise ValueError(
+                    "resolve_outcome(): missing player_fouls bucket for off_team_id "
+                    f"(game_id={game_id!r}, off_team_id={off_team_id!r}, keys={list(player_fouls_by_team.keys())!r})"
+                )
+            if off_team_id not in game_state.fatigue:
+                raise ValueError(
+                    "resolve_outcome(): missing fatigue bucket for off_team_id "
+                    f"(game_id={game_id!r}, off_team_id={off_team_id!r}, keys={list(game_state.fatigue.keys())!r})"
+                )
+
+            pf = player_fouls_by_team[off_team_id]
+            foul_out_limit = int(ctx.get("foul_out", 6))
+            pf[actor.pid] = pf.get(actor.pid, 0) + 1
+            team_fouls[off_team_id] = int(team_fouls[off_team_id]) + 1
+
+            if pf.get(actor.pid, 0) >= foul_out_limit:
+                game_state.fatigue[off_team_id][actor.pid] = 0.0
+
+            # Hint flags for replay/UI (sim_possession may log this as an offensive foul whistle).
+            payload.update(
+                {
+                    "offensive_foul": True,
+                    "foul_type": "CHARGE",
+                    "foul_pid": actor.pid,
+                    "team_foul": True,
+                    "player_fouls": int(pf.get(actor.pid, 0)),
+                    "team_fouls": int(team_fouls[off_team_id]),
+                    "deadball_override": True,
+                    "tov_deadball_reason": "CHARGE",
+                }
+            )
+
+
         # For select live-ball turnovers, split into (steal vs non-steal) so defensive playmakers
         # are credited and downstream possession context can reflect stronger transition starts.
         if outcome in ("TO_BAD_PASS", "TO_HANDLE_LOSS"):
