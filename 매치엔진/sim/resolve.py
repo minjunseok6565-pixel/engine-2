@@ -362,23 +362,44 @@ def resolve_outcome(
         ctx = {}
     if game_cfg is None:
         raise ValueError("resolve_outcome requires game_cfg")
+    # Strong SSOT contract: resolve layer never infers home/away and never accepts side-keyed ctx.
+    game_id = str(ctx.get("game_id", "") or "").strip()
 
-    off_team_key = str(ctx.get("off_team_key") or "")
-    def_team_key = str(ctx.get("def_team_key") or "")
+    # Prefer object SSOT (TeamState.team_id). ctx may redundantly include off_team_id/def_team_id for validation.
+    off_team_id = str(getattr(offense, "team_id", "") or "").strip()
+    def_team_id = str(getattr(defense, "team_id", "") or "").strip()
+    if not off_team_id or not def_team_id:
+        raise ValueError(
+            f"resolve_outcome(): offense/defense must have non-empty team_id (game_id={game_id!r}, off={off_team_id!r}, def={def_team_id!r})"
+        )
+    if off_team_id == def_team_id:
+        raise ValueError(
+            f"resolve_outcome(): offense.team_id == defense.team_id == {off_team_id!r} (game_id={game_id!r})"
+        )
 
-    def _with_team(payload: Dict[str, Any], include_fouler: bool = False) -> Dict[str, Any]:
-        if off_team_key:
-            payload.setdefault("team", off_team_key)
-        if include_fouler and def_team_key:
-            payload.setdefault("fouler_team", def_team_key)
-        return payload
+    # Explicitly reject legacy side-key hints if they appear.
+    if "off_team_key" in ctx or "def_team_key" in ctx:
+        raise ValueError(
+            f"resolve_outcome(): legacy ctx keys are not allowed (game_id={game_id!r}, keys={[k for k in (\"off_team_key\",\"def_team_key\") if k in ctx]!r})"
+        )
+
+    ctx_off = str(ctx.get("off_team_id", "") or "").strip()
+    ctx_def = str(ctx.get("def_team_id", "") or "").strip()
+    if ctx_off and ctx_off != off_team_id:
+        raise ValueError(
+            f"resolve_outcome(): ctx.off_team_id mismatch (game_id={game_id!r}, ctx={ctx_off!r}, offense.team_id={off_team_id!r})"
+        )
+    if ctx_def and ctx_def != def_team_id:
+        raise ValueError(
+            f"resolve_outcome(): ctx.def_team_id mismatch (game_id={game_id!r}, ctx={ctx_def!r}, defense.team_id={def_team_id!r})"
+        )
 
     if outcome == "TO_SHOT_CLOCK":
         clear_pass_tracking(ctx)
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", _with_team({"outcome": outcome, "pid": actor.pid})
+        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
 
     def _record_exception(where: str, exc: BaseException) -> None:
         """Record exceptions into ctx for debugging without breaking sim flow."""
@@ -636,7 +657,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "SCORE", _with_team({
+            return "SCORE", {
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -644,7 +665,7 @@ def resolve_outcome(
                 "assisted": assisted,
                 "assister_pid": assister_pid,
                 **shot_dbg,
-            })
+            }
         else:
             payload = {
                 "outcome": outcome,
@@ -703,7 +724,7 @@ def resolve_outcome(
                 _record_exception("block_model", e)
                 
             clear_pass_tracking(ctx)
-            return "MISS", _with_team(payload)
+            return "MISS", payload
 
 
     if is_pass(outcome):
@@ -839,7 +860,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "TURNOVER", _with_team(payload)
+            return "TURNOVER", payload
 
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
@@ -1031,42 +1052,63 @@ def resolve_outcome(
             except Exception as e:
                 _record_exception("steal_split_to", e)
 
-        return "TURNOVER", _with_team(payload)
+        return "TURNOVER", payload
 
     if is_foul(outcome):
-        fouler_pid = None
-        team_fouls = ctx.get("team_fouls") or {}
-        player_fouls_by_team = ctx.get("player_fouls_by_team") or {}
-        pf = player_fouls_by_team.setdefault(def_team_key, {})
+        # Fouls mutate team-scoped state (team_fouls / player_fouls / fatigue). game_state is required.
+        if game_state is None:
+            raise ValueError(
+                f"resolve_outcome(): game_state is required for foul outcomes (game_id={game_id!r}, outcome={outcome!r})"
+            )
+
         foul_out_limit = int(ctx.get("foul_out", 6))
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
-        def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
+        # On-court defenders snapshot (prefer explicit ctx snapshot from sim_game; fallback to TeamState SSOT).
+        def_on_court = ctx.get("def_on_court")
+        if not isinstance(def_on_court, list) or not def_on_court:
+            def_on_court = [p.pid for p in defense.on_court_players()]
 
-        # assign a random fouler from on-court defenders (MVP)
+        # Strict team-id keyed containers (must already be initialized by sim_game).
+        if def_team_id not in game_state.player_fouls:
+            raise ValueError(
+                f"resolve_outcome(): GameState.player_fouls missing defense team_id (game_id={game_id!r}, def_team_id={def_team_id!r})"
+            )
+        if def_team_id not in game_state.team_fouls:
+            raise ValueError(
+                f"resolve_outcome(): GameState.team_fouls missing defense team_id (game_id={game_id!r}, def_team_id={def_team_id!r})"
+            )
+        if def_team_id not in game_state.fatigue:
+            raise ValueError(
+                f"resolve_outcome(): GameState.fatigue missing defense team_id (game_id={game_id!r}, def_team_id={def_team_id!r})"
+            )
+
+        pf = game_state.player_fouls[def_team_id]
+        team_fouls = game_state.team_fouls
+        fatigue = game_state.fatigue[def_team_id]
+
+        fouler_pid = None
+
+        # Assign a fouler from on-court defenders.
         if def_on_court:
             fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
-                if game_state is not None:
-                    game_state.player_fouls.setdefault(def_team_key, {})[fouler_pid] = pf[fouler_pid]
-
-        # update team fouls
-        team_fouls[def_team_key] = team_fouls.get(def_team_key, 0) + 1
-        if game_state is not None:
-            game_state.team_fouls[def_team_key] = team_fouls[def_team_key]
-
-        in_bonus = bool(team_fouls.get(def_team_key, 0) >= bonus_threshold)
+        # Update team fouls (defense committed the foul).
+        team_fouls[def_team_id] = int(team_fouls[def_team_id]) + 1
+        # Non-shooting foul becomes dead-ball unless in bonus.
 
         # Non-shooting foul (reach/trap) becomes dead-ball unless in bonus.
         if outcome == "FOUL_REACH_TRAP" and not in_bonus:
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
-                if game_state is not None:
-                    game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+                # Foul-out sentinel: clamp energy to 0.0 so rotation can force substitution.
+                fatigue[fouler_pid] = 0.0
             clear_pass_tracking(ctx)
-            return "FOUL_NO_SHOTS", _with_team(
-                {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False},
-                include_fouler=True,
-            )
+            return "FOUL_NO_SHOTS", {
+                "outcome": outcome,
+                "pid": actor.pid,
+                "fouler": fouler_pid,
+                "bonus": False,
+            }
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
@@ -1110,130 +1152,83 @@ def resolve_outcome(
                     )
                     q_score = float(q_detail.score)
                 else:
-                    q_score = float(quality.compute_quality_score(
-                        scheme=scheme,
-                        base_action=base_action,
-                        outcome=outcome,
-                        role_players=role_players,
-                        get_stat=engine_get_stat,
-                    ))
+                    q_score = float(
+                        quality.compute_quality_score(
+                            scheme=scheme,
+                            base_action=base_action,
+                            outcome=outcome,
+                            role_players=role_players,
+                            get_stat=engine_get_stat,
+                        )
+                    )
             except Exception as e:
-                _record_exception("quality_compute_foul_draw", e)
+                _record_exception("foul_draw_quality", e)
                 q_score = 0.0
-            q_delta = float(quality.score_to_logit_delta(outcome, q_score))
-            foul_dbg = {}
-            if debug_q:
-                foul_dbg = {"q_score": float(q_score), "q_delta": float(q_delta), "q_detail": q_detail, "carry_in": float(carry_in)}
-
-            shot_base = game_cfg.shot_base if isinstance(game_cfg.shot_base, Mapping) else {}
-            base_p = shot_base.get(shot_key, 0.45)
-            kind = _shot_kind_from_outcome(shot_key)
-            if kind == "shot_rim":
-                base_p *= _knob_mult(game_cfg, "shot_base_rim_mult", 1.0)
-            elif kind == "shot_mid":
-                base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
-            else:
-                base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
-
-            p_make = prob_from_scores(
-                rng,
-                base_p,
-                off_score,
-                def_score,
-                kind=kind,
-                variance_mult=variance_mult,
-                logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
-                fatigue_logit_delta=fatigue_logit_delta,
-                game_cfg=game_cfg,
-            )
-
-            # Apply contact penalty ONLY for fouled shots.
-            # This reduces and-ones (shot_made -> nfts=1) and shifts mix toward 2FT trips.
-            bucket = FOUL_DRAW_CONTACT_BUCKET.get(shot_key, "normal")
-            default_mult = float(CONTACT_PENALTY_MULT.get(bucket, 1.0))
-            mult = float(
-                ctx.get(
-                    f"foul_contact_pmake_mult_{bucket}",
-                    pm.get(f"foul_contact_pmake_mult_{bucket}", default_mult),
+            # Determine make-prob for the "would-be" shot (and-1 logic).
+            try:
+                base_make = float(pm.get("foul_draw_make_base", 0.46))
+                make_var = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
+                p_make = prob_from_scores(
+                    rng,
+                    base_make,
+                    off_score,
+                    def_score,
+                    kind="foul_draw_make",
+                    variance_mult=make_var,
+                    logit_delta=float(q_score) * 0.35,
+                    game_cfg=game_cfg,
                 )
-            )
-            if mult != 1.0:
-                pmin = float(ctx.get("foul_contact_pmake_min", pm.get("foul_contact_pmake_min", 0.01)))
-                pmax = float(ctx.get("foul_contact_pmake_max", pm.get("foul_contact_pmake_max", 0.99)))
-                p_make = clamp(p_make * mult, pmin, pmax)
+                shot_made = bool(rng.random() < p_make)
+                if debug_q:
+                    foul_dbg.update({"q_score": float(q_score), "q_detail": q_detail, "p_make": float(p_make)})
+            except Exception as e:
+                _record_exception("foul_draw_make_model", e)
+                shot_made = False
 
-            # Boxscore convention for shooting fouls:
-            # - MISSED fouled shot -> no FGA/3PA is recorded.
-            # - MADE fouled shot   -> counts as FGA (+3PA if it was a 3), and can be an and-one.
-            shot_zone = shot_zone_from_outcome(shot_key)
-            zone_detail = shot_zone_detail_from_outcome(shot_key, action, game_cfg, rng)
-
-            shot_made = rng.random() < p_make
+            # If shot made: credit FGA/FGM + points + potential assist.
             if shot_made:
-                # count the attempt only when it goes in (and-one / 4-pt play)
                 offense.fga += 1
-                offense.add_player_stat(actor.pid, "FGA", 1)
-                if shot_zone:
-                    offense.shot_zones[shot_zone] = offense.shot_zones.get(shot_zone, 0) + 1
-                if zone_detail:
-                    offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
-                    offense.shot_zone_detail[zone_detail]["FGA"] += 1
-                if game_state is not None and ctx.get("first_fga_shotclock_sec") is None:
-                    ctx["first_fga_shotclock_sec"] = float(game_state.shot_clock_sec)
-                if pts == 3:
-                    offense.tpa += 1
-                    offense.add_player_stat(actor.pid, "3PA", 1)
 
                 offense.fgm += 1
-                offense.add_player_stat(actor.pid, "FGM", 1)
-                if pts == 3:
-                    offense.tpm += 1
-                    offense.add_player_stat(actor.pid, "3PM", 1)
                 offense.pts += pts
-                offense.add_player_stat(actor.pid, "PTS", pts)
-                # Fastbreak points: credit only the made FG (exclude subsequent FT).
-                try:
-                    if _should_award_fastbreak_fg(ctx, ctx.get("first_fga_shotclock_sec")):
-                        offense.fastbreak_pts += int(pts)
-                except Exception as e:
-                    _record_exception("fastbreak_pts_award_fg", e)
-                and_one = True
-                if zone_detail:
-                    offense.shot_zone_detail[zone_detail]["FGM"] += 1
 
-                # minimal assist treatment on rim fouls (jumper fouls remain unassisted)
-                assisted_heur = False
-                assister_pid = None
-                if shot_key != "SHOT_3_OD":
+                actor.add_player_stat("FGA", 1)
+                actor.add_player_stat("FGM", 1)
+                actor.add_player_stat("PTS", pts)
+
+                and_one = True
+
+                zone_detail = None
+                try:
+                    zone_detail = shot_zone_detail(shot_key)
+                    if zone_detail:
+                        offense.shot_zone_detail.setdefault(zone_detail, {"FGA": 0, "FGM": 0, "AST_FGM": 0})
+                        offense.shot_zone_detail[zone_detail]["FGA"] += 1
+                        offense.shot_zone_detail[zone_detail]["FGM"] += 1
+                except Exception as e:
+                    _record_exception("foul_draw_zone_detail", e)
+
+                # Prefer true last passer within the assist window for rim/post fouls.
+                assister_pid = pick_assister_from_history(ctx, offense, actor.pid, game_state, shot_key)
+                if assister_pid is None and shot_key != "SHOT_3_OD":
                     try:
-                        assisted_heur = bool(ctx.get("pass_chain", pass_chain)) and float(
-                            ctx.get("pass_chain", pass_chain)
-                        ) > 0
+                        assisted_heur = bool(ctx.get("pass_chain", pass_chain)) and float(ctx.get("pass_chain", pass_chain)) > 0
                     except Exception as e:
                         _record_exception("assist_flag_parse", e)
                         assisted_heur = False
 
-                # Prefer true last passer within the assist window (based on shot_key).
-                assister_pid = pick_assister_from_history(ctx, offense, actor.pid, game_state, shot_key)
-
-                assisted = False
-                if assister_pid is not None:
-                    assisted = True
-                else:
-                    assisted = bool(assisted_heur)
-                    if assisted:
+                if assisted_heur:
                         assister = choose_assister_weighted(rng, offense, actor.pid, base_action, shot_key, style=style)
-                        if assister:
-                            assister_pid = assister.pid
-                        else:
-                            assisted = False
-                            assister_pid = None
+                        assister_pid = assister.pid if assister else None
 
                 if assister_pid is not None:
                     offense.ast += 1
                     offense.add_player_stat(assister_pid, "AST", 1)
-                    if zone_detail:
-                        offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
+                    try:
+                        if zone_detail:
+                            offense.shot_zone_detail[zone_detail]["AST_FGM"] += 1
+                    except Exception:
+                        pass
 
                 if zone_detail in ("Restricted_Area", "Paint_Non_RA"):
                     offense.pitp += 2
@@ -1245,9 +1240,9 @@ def resolve_outcome(
 
         ft_res = resolve_free_throws(rng, actor, nfts, offense, game_cfg=game_cfg)
 
+        # Foul-out sentinel after the trip.  
         if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
-            if game_state is not None:
-                game_state.fatigue.setdefault(def_team_key, {})[fouler_pid] = 0.0
+            fatigue[fouler_pid] = 0.0
 
         payload = {
             "outcome": outcome,
@@ -1259,12 +1254,12 @@ def resolve_outcome(
             "and_one": and_one,
             "nfts": int(nfts),
         }
-        if isinstance(ft_res, Mapping):
+        if isinstance(ft_res, dict):
             payload.update(ft_res)
-        if isinstance(foul_dbg, Mapping) and foul_dbg:
+        if isinstance(foul_dbg, dict) and foul_dbg:
             payload.update(foul_dbg)
         clear_pass_tracking(ctx)
-        return "FOUL_FT", _with_team(payload, include_fouler=True)
+        return "FOUL_FT", payload
 
 
     if is_reset(outcome):
