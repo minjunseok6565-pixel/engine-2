@@ -368,11 +368,6 @@ def resolve_outcome(
     # SSOT / team_id-only contract (no legacy keys; no inference/repair here).
     game_id = ctx.get("game_id")
 
-    if "off_team_key" in ctx or "def_team_key" in ctx:
-        raise ValueError(
-            "resolve_outcome(): legacy ctx keys are not allowed "
-            f"(game_id={game_id!r}, has_off_team_key={'off_team_key' in ctx}, has_def_team_key={'def_team_key' in ctx})"
-        )
 
     off_team_id = str(ctx.get("off_team_id", "") or "").strip()
     def_team_id = str(ctx.get("def_team_id", "") or "").strip()
