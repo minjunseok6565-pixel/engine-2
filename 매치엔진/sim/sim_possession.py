@@ -1024,10 +1024,14 @@ def simulate_possession(
                 is_dead = False
             # Replay log: turnover (resolve payload contains pid/outcome/type/steal/...).
             try:
+                # Charge is both a turnover and an offensive foul; log it as an offensive foul whistle.
+                event_type = "TURNOVER"
+                if isinstance(payload, dict) and (payload.get("offensive_foul") or tov_outcome == "TO_CHARGE"):
+                    event_type = "OFFENSIVE_FOUL"
                 rp = _clean_replay_payload(payload, drop={"pos_start_next_override"})
                 emit_event(
                     game_state,
-                    event_type="TURNOVER",
+                    event_type=event_type,
                     home=home_team,
                     away=away_team,
                     rules=rules,
