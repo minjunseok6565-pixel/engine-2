@@ -70,6 +70,7 @@ def build_offense_action_probs(
     if p > 0.0:
         base["PnR"] = base.get("PnR", 0.5) * (1.0 + 0.05 * p)
         base["Drive"] = base.get("Drive", 0.5) * (1.0 + 0.05 * p)
+        base["ISO"] = base.get("ISO", 0.5) * (1.0 + 0.08 * p)
         base["TransitionEarly"] = base.get("TransitionEarly", 0.5) * (1.0 - 0.10 * p)
         
     # possession-start context tweaks (event-based possession start)
