@@ -66,6 +66,32 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "blocked_orb_mult_post": 0.80,
     "blocked_orb_mult_mid": 0.86,
     "blocked_orb_mult_3": 0.88,
+
+
+    # Putback modeling (ORB -> immediate try)
+    # 'try' params are probabilities in [0..1] used at the ORB branch to choose a "Putback" action.
+    "putback_try_base_rim": 0.27,
+    "putback_try_base_post": 0.24,
+    "putback_try_base_mid": 0.14,
+    "putback_try_base_3": 0.08,
+    "putback_try_base_ft": 0.30,
+
+    # If the miss was blocked but stayed in-play, putback tries are less frequent (defender is attached).
+    "putback_try_mult_blocked": 0.70,
+
+    # Skill-based multiplier around 1.0 (computed from rebounder attributes; clamped below).
+    "putback_try_w_reb_or": 0.55,
+    "putback_try_w_fin": 0.35,
+    "putback_try_w_phy": 0.20,
+    "putback_try_skill_mult_min": 0.70,
+    "putback_try_skill_mult_max": 1.35,
+
+    # Final try probability clamp
+    "putback_try_clamp_min": 0.02,
+    "putback_try_clamp_max": 0.45,
+
+    # Shot make penalty for Putback (logit-space delta added in resolve.py)
+    "putback_make_logit_penalty": -0.30,
 }
 
 
@@ -180,6 +206,7 @@ MVP_RULES = {
         "HornsSet": 7.0,
         "SpotUp": 4.4,
         "QuickShot": 1.2,
+        "Putback": 0.95,
         "Cut": 4.6,
         "TransitionEarly": 4.0,
         "Kickout": 2.8,
