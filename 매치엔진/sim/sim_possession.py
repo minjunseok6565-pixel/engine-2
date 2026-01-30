@@ -474,6 +474,9 @@ def apply_team_style_to_action_probs(
             mult *= rim_bias
         if base in ("PnR", "DHO"):
             mult *= (0.55 * three_bias + 0.45 * rim_bias)
+        if base == "ISO":
+            # ISO는 on-ball 창출 성격이라 rim/three 둘 다 영향을 받되, mid-range 성격을 반영해 중립값을 섞는다.
+            mult *= (0.45 * three_bias + 0.35 * rim_bias + 0.20)
         out[k] = float(v) * float(mult)
 
     return _renorm(out)

@@ -244,6 +244,15 @@ def _collect_roles_for_action_family(action_family: str, offense: TeamState) -> 
         if pick:
             parts.append(pick)
 
+    elif fam == "ISO":
+        # On-ball creator + spacing check (ISO도 다른 액션과 동일하게 role-fit 영향권에 들어오도록)
+        pick = _choose_best_role(offense, ["Shot_Creator", "Initiator_Primary", "Rim_Attacker", "Post_Hub"])
+        if pick:
+            parts.append(pick)
+        pick2 = _choose_best_role(offense, ["Spacer_CatchShoot", "Spacer_Movement"])
+        if pick2:
+            parts.append(pick2)
+
     elif fam == "Kickout":
         for group in [
             ["Rim_Attacker", "Shot_Creator", "Initiator_Primary"],

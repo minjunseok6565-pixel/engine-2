@@ -174,6 +174,7 @@ MVP_RULES = {
         "PnR": 8.3,
         "DHO": 7.1,
         "Drive": 6.2,
+        "ISO": 7.6,
         "PostUp": 8.2,
         "HornsSet": 7.0,
         "SpotUp": 4.4,
