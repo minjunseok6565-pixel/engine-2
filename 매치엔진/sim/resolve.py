@@ -481,6 +481,22 @@ def resolve_outcome(
     else:
         actor = _pick_default_actor(offense)
 
+    # Optional forced actor (e.g., ORB -> immediate Putback):
+    # If provided, override the chosen shooter/foul-draw/turnover actor once and then consume.
+    force_pid = ctx.get("force_actor_pid")
+    if force_pid and (is_shot(outcome) or is_foul(outcome) or is_to(outcome)):
+        try:
+            fp = str(force_pid)
+            if fp and offense.is_on_court(fp):
+                fp_player = offense.find_player(fp)
+                if fp_player is not None:
+                    actor = fp_player
+        except Exception as e:
+            _record_exception("force_actor_pid", e)
+        finally:
+            # consume (one-shot) to avoid leaking into subsequent steps
+            ctx.pop("force_actor_pid", None)
+
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
     # compute scores
@@ -554,6 +570,18 @@ def resolve_outcome(
             base_p *= _knob_mult(game_cfg, "shot_base_mid_mult", 1.0)
         else:
             base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
+
+        # Putback: fixed make penalty (logit space). Keeps putbacks "tight" regardless of quality table.
+        putback_pen = 0.0
+        if base_action == "Putback":
+            try:
+                putback_pen = float(pm.get("putback_make_logit_penalty", -0.30))
+            except Exception as e:
+                _record_exception("putback_make_logit_penalty", e)
+                putback_pen = -0.30
+        if debug_q:
+            shot_dbg["putback_pen"] = float(putback_pen)
+
         p_make = prob_from_scores(
             rng,
             base_p,
@@ -561,7 +589,7 @@ def resolve_outcome(
             def_score,
             kind=kind,
             variance_mult=variance_mult,
-            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
+            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(putback_pen),
             fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
