@@ -289,6 +289,29 @@ def _team_mean_stat(team: TeamState, key: str, default: float = 50.0) -> float:
     return float(sum(vals) / len(vals))
 
 
+def _player_stat(player: Any, key: str, default: float = 50.0) -> float:
+    """Best-effort stat getter for Player-like objects.
+
+    Prefer fatigue-insensitive values when available. Falls back to derived dict,
+    then default.
+    """
+    try:
+        # Most Player objects in this engine support fatigue_sensitive.
+        return float(player.get(key, fatigue_sensitive=False))
+    except TypeError:
+        # Back-compat: older signature without fatigue_sensitive.
+        try:
+            return float(player.get(key))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        return float(getattr(player, "derived", {}).get(key, default))
+    except Exception:
+        return float(default)
+
+
 def _z_to_mult(z: float, strength: float, lo: float, hi: float) -> float:
     """Convert a coarse z-score into a small multiplicative bias."""
     return clamp(1.0 + float(z) * float(strength), float(lo), float(hi))
@@ -1185,6 +1208,57 @@ def simulate_possession(
                 except Exception:
                     pass
                 game_state.shot_clock_sec = float(rules.get("foul_reset", rules.get("orb_reset", game_state.shot_clock_sec)))
+
+                # ORB -> immediate Putback (one-shot action): only available after offensive rebound.
+                # If chosen, we also force the rebounder as the shot actor via ctx['force_actor_pid'].
+                pm = getattr(game_cfg, "prob_model", {}) or {}
+                try:
+                    p_base = float(pm.get("putback_try_base_ft", 0.30))
+                except Exception:
+                    p_base = 0.30
+
+                reb_or = _player_stat(rbd, "REB_OR", 50.0)
+                fin_rim = _player_stat(rbd, "FIN_RIM", 50.0)
+                fin_dunk = _player_stat(rbd, "FIN_DUNK", 50.0)
+                physical = _player_stat(rbd, "PHYSICAL", 50.0)
+
+                fin_raw = 0.65 * fin_rim + 0.35 * fin_dunk
+                orb01 = clamp((reb_or - 70.0) / 45.0, 0.0, 1.0)
+                fin01 = clamp((fin_raw - 70.0) / 45.0, 0.0, 1.0)
+                phy01 = clamp((physical - 60.0) / 45.0, 0.0, 1.0)
+
+                try:
+                    w_reb = float(pm.get("putback_try_w_reb_or", 0.55))
+                    w_fin = float(pm.get("putback_try_w_fin", 0.35))
+                    w_phy = float(pm.get("putback_try_w_phy", 0.20))
+                except Exception:
+                    w_reb, w_fin, w_phy = 0.55, 0.35, 0.20
+
+                try:
+                    mult_min = float(pm.get("putback_try_skill_mult_min", 0.70))
+                    mult_max = float(pm.get("putback_try_skill_mult_max", 1.35))
+                except Exception:
+                    mult_min, mult_max = 0.70, 1.35
+
+                skill_mult = 1.0 + w_reb * (orb01 - 0.5) + w_fin * (fin01 - 0.5) + w_phy * (phy01 - 0.5)
+                skill_mult = clamp(skill_mult, mult_min, mult_max)
+
+                try:
+                    p_min = float(pm.get("putback_try_clamp_min", 0.02))
+                    p_max = float(pm.get("putback_try_clamp_max", 0.45))
+                except Exception:
+                    p_min, p_max = 0.02, 0.45
+
+                p_putback = clamp(float(p_base) * float(skill_mult), p_min, p_max)
+                if rng.random() < p_putback:
+                    action = "Putback"
+                    ctx["force_actor_pid"] = getattr(rbd, "pid", None)
+                    _refresh_action_tags(action, tags)
+                    pass_chain = 0
+                    had_orb = True
+                    stall_steps = _bump_stall(stall_steps, sc0, gc0)
+                    continue
+
                 r2 = rng.random()
                 if r2 < 0.45:
                     action = "Kickout"
@@ -1347,6 +1421,79 @@ def simulate_possession(
                 except Exception:
                     pass
                 game_state.shot_clock_sec = float(rules.get("orb_reset", game_state.shot_clock_sec))
+
+                # ORB -> immediate Putback (one-shot action): only available after offensive rebound.
+                # If chosen, we also force the rebounder as the shot actor via ctx['force_actor_pid'].
+                pm = getattr(game_cfg, "prob_model", {}) or {}
+
+                o = str(outcome or "")
+                if o in ("SHOT_RIM_LAYUP", "SHOT_RIM_DUNK", "SHOT_RIM_CONTACT", "SHOT_TOUCH_FLOATER"):
+                    bucket = "rim"
+                elif o == "SHOT_POST":
+                    bucket = "post"
+                elif o in ("SHOT_MID_CS", "SHOT_MID_PU"):
+                    bucket = "mid"
+                elif o in ("SHOT_3_CS", "SHOT_3_OD"):
+                    bucket = "3"
+                else:
+                    bucket = "rim"
+
+                pb_defaults = {"rim": 0.27, "post": 0.24, "mid": 0.14, "3": 0.08}
+                try:
+                    p_base = float(pm.get(f"putback_try_base_{bucket}", pb_defaults.get(bucket, 0.27)))
+                except Exception:
+                    p_base = float(pb_defaults.get(bucket, 0.27))
+
+                # If the miss was blocked but stayed in play, putback tries are less frequent.
+                if blocked:
+                    try:
+                        p_base = float(p_base) * float(pm.get("putback_try_mult_blocked", 0.70))
+                    except Exception:
+                        p_base = float(p_base) * 0.70
+
+                reb_or = _player_stat(rbd, "REB_OR", 50.0)
+                fin_rim = _player_stat(rbd, "FIN_RIM", 50.0)
+                fin_dunk = _player_stat(rbd, "FIN_DUNK", 50.0)
+                physical = _player_stat(rbd, "PHYSICAL", 50.0)
+
+                fin_raw = 0.65 * fin_rim + 0.35 * fin_dunk
+                orb01 = clamp((reb_or - 70.0) / 45.0, 0.0, 1.0)
+                fin01 = clamp((fin_raw - 70.0) / 45.0, 0.0, 1.0)
+                phy01 = clamp((physical - 60.0) / 45.0, 0.0, 1.0)
+
+                try:
+                    w_reb = float(pm.get("putback_try_w_reb_or", 0.55))
+                    w_fin = float(pm.get("putback_try_w_fin", 0.35))
+                    w_phy = float(pm.get("putback_try_w_phy", 0.20))
+                except Exception:
+                    w_reb, w_fin, w_phy = 0.55, 0.35, 0.20
+
+                try:
+                    mult_min = float(pm.get("putback_try_skill_mult_min", 0.70))
+                    mult_max = float(pm.get("putback_try_skill_mult_max", 1.35))
+                except Exception:
+                    mult_min, mult_max = 0.70, 1.35
+
+                skill_mult = 1.0 + w_reb * (orb01 - 0.5) + w_fin * (fin01 - 0.5) + w_phy * (phy01 - 0.5)
+                skill_mult = clamp(skill_mult, mult_min, mult_max)
+
+                try:
+                    p_min = float(pm.get("putback_try_clamp_min", 0.02))
+                    p_max = float(pm.get("putback_try_clamp_max", 0.45))
+                except Exception:
+                    p_min, p_max = 0.02, 0.45
+
+                p_putback = clamp(float(p_base) * float(skill_mult), p_min, p_max)
+                if rng.random() < p_putback:
+                    action = "Putback"
+                    ctx["force_actor_pid"] = getattr(rbd, "pid", None)
+                    _refresh_action_tags(action, tags)
+                    pass_chain = 0
+                    had_orb = True
+                    stall_steps = _bump_stall(stall_steps, sc0, gc0)
+                    continue
+
+                
                 r2 = rng.random()
                 if r2 < 0.45:
                     action = "Kickout"
