@@ -172,6 +172,7 @@ MVP_RULES = {
         "FoulStop": 2.6,
         "BlockOOBStop": 2.0,
         "PnR": 8.3,
+        "PnP": 8.0,
         "DHO": 7.1,
         "Drive": 6.2,
         "ISO": 7.6,

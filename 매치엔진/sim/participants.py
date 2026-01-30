@@ -334,7 +334,7 @@ def _pass_family(base_action: str, outcome: str) -> str:
     if ba in ("TransitionEarly",):
         return "transition"
 
-    if ba in ("PnR", "DHO"):
+    if ba in ("PnR", "DHO", "PnP"):
         return "pnr"
 
     if ba in ("PostUp", "ElbowHub", "HornsSet"):

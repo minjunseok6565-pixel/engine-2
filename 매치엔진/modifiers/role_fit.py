@@ -229,6 +229,24 @@ def _collect_roles_for_action_family(action_family: str, offense: TeamState) -> 
             if p:
                 parts.append(("Pop_Spacer_Big", p, role_fit_score(p, "Pop_Spacer_Big")))
 
+    elif fam == "PnP":
+        # Pick-and-pop: handler + pop threat big (PnR과 동급 액션으로 role-fit 참여자를 수집)
+        pick = _choose_best_role(offense, ["Initiator_Primary"])
+        if pick:
+            parts.append(pick)
+        pick = _choose_best_role(offense, ["Initiator_Secondary"])
+        if pick:
+            parts.append(pick)
+
+        pick = _choose_best_role(offense, ["Pop_Spacer_Big", "Post_Hub"])
+        if pick:
+            parts.append(pick)
+
+        # Optional: spacing/connector
+        pick = _choose_best_role(offense, ["Spacer_CatchShoot", "Spacer_Movement", "Connector_Playmaker"])
+        if pick:
+            parts.append(pick)
+
     elif fam == "DHO":
         for group in [
             ["Initiator_Secondary", "Connector_Playmaker"],
