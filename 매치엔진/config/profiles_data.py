@@ -430,6 +430,14 @@ ACTION_OUTCOME_PRIORS: Dict[str, Dict[str, float]] = {
         "TO_CHARGE": 0.015,
         "RESET_HUB": 0.085,
     },
+    "Putback": {
+        "SHOT_RIM_LAYUP": 0.46,
+        "SHOT_RIM_DUNK": 0.16,
+        "SHOT_RIM_CONTACT": 0.17,
+        "SHOT_TOUCH_FLOATER": 0.09,
+        "FOUL_DRAW_RIM": 0.10,
+        "TO_HANDLE_LOSS": 0.02,
+    },
 }
 
 
