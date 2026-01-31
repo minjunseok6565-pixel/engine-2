@@ -48,12 +48,12 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     # combined with score/quality modulation (prob_from_scores) and contextual deltas.
     "steal_bad_pass_base": 0.72,
     "steal_handle_loss_base": 0.84,
-    "bad_pass_lineout_base": 0.20,
+    "bad_pass_lineout_base": 0.25,
 
-    "block_base_rim": 0.085,
-    "block_base_post": 0.065,
-    "block_base_mid": 0.022,
-    "block_base_3": 0.012,
+    "block_base_rim": 0.1,
+    "block_base_post": 0.08,
+    "block_base_mid": 0.025,
+    "block_base_3": 0.017,
 
     # Block outcomes: out-of-bounds -> offense retains (dead-ball) vs live rebound.
     "block_oob_base_rim": 0.32,
