@@ -46,8 +46,8 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     # Steal / block event modeling (used by resolve.py; 0-1)
     # NOTE: These are event probabilities, not boxscore rates. They are intended to be
     # combined with score/quality modulation (prob_from_scores) and contextual deltas.
-    "steal_bad_pass_base": 0.60,
-    "steal_handle_loss_base": 0.72,
+    "steal_bad_pass_base": 0.72,
+    "steal_handle_loss_base": 0.84,
     "bad_pass_lineout_base": 0.30,
 
     "block_base_rim": 0.085,
