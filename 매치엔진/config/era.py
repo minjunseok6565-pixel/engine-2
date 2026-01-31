@@ -35,7 +35,7 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "rebound_scale": 22.0,
 
     # ORB baseline used in rebound_orb_probability()
-    "orb_base": 0.23,
+    "orb_base": 0.20,
 
     # FT model used in resolve_free_throws()
     "ft_base": 0.52,
@@ -91,7 +91,7 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "putback_try_clamp_max": 0.45,
 
     # Shot make penalty for Putback (logit-space delta added in resolve.py)
-    "putback_make_logit_penalty": -0.30,
+    "putback_make_logit_penalty": -0.22,
 }
 
 
