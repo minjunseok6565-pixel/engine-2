@@ -76,7 +76,15 @@ def _agg_anchor(lineup, key: str) -> float:
 
 
 def team_def_snapshot(team: TeamState) -> Dict[str, float]:
-    lineup = getattr(team, "lineup", None) or []
+    # Use ON-COURT players for defensive snapshot.
+    # Fallback to full roster only if on-court data is unavailable.
+    lineup = []
+    try:
+        lineup = team.on_court_players()
+    except Exception:
+        lineup = []
+    if not lineup:
+        lineup = getattr(team, "lineup", None) or []
     if not lineup:
         # Defensive-neutral fallback (should be rare, but avoids crashes).
         return {
