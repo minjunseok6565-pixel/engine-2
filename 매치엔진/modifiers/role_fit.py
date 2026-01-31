@@ -528,8 +528,6 @@ def apply_role_fit_to_priors_and_tags(
 
     fits = [f for (_, _, f) in participants]
     fit_eff = _role_fit_effective_score(fits) if applied else 50.0
-    grade = _effective_grade_from_participants(participants) if applied else "B"
-
     # Backward-compatible discrete grade (worst-link) for counters/UI.
     worst_grade = _effective_grade_from_participants(participants) if applied else "B"
 
