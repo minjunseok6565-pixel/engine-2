@@ -323,7 +323,7 @@ def _should_award_fastbreak_fg(ctx: dict, first_fga_sc) -> bool:
         origin = str(ctx.get("_pos_origin_start") or ctx.get("pos_start") or "")
     except Exception:
         origin = ""
-    if origin not in ("after_tov", "after_drb"):
+    if origin not in ("after_tov", "after_drb", "after_steal", "after_block"):
         return False
     # Any dead-ball continuation segment implies defense is set -> not a fastbreak score.
     if bool(ctx.get("_pos_continuation", False)):
@@ -334,7 +334,7 @@ def _should_award_fastbreak_fg(ctx: dict, first_fga_sc) -> bool:
     if first_fga_sc is None:
         return False
     try:
-        return float(first_fga_sc) >= 16.0
+        return float(first_fga_sc) >= 14.0
     except Exception:
         return False
 
