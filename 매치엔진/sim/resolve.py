@@ -814,7 +814,7 @@ def resolve_outcome(
             q_score = 0.0
 
                 # Threshold buckets (score in [-2.5, +2.5])
-        t_to = float(ctx.get("pass_q_to", -0.9))
+        t_to = float(ctx.get("pass_q_to", -0.55))
         t_reset = float(ctx.get("pass_q_reset", -0.3))
         t_neg = float(ctx.get("pass_q_neg", -0.2))
         t_pos = float(ctx.get("pass_q_pos", 0.2))
@@ -823,7 +823,7 @@ def resolve_outcome(
         # - Old behavior: hard cutoffs (<= t_to => TO, <= t_reset => RESET, carry bucket by <= t_neg / >= t_pos)
         # - New behavior: the same thresholds define the *midpoints* (p=0.5) of sigmoid transitions.
         #   Larger slopes => closer to the old step-function behavior.
-        s_to = float(ctx.get("pass_q_to_slope", 6.0))
+        s_to = float(ctx.get("pass_q_to_slope", 6.5))
         s_reset = float(ctx.get("pass_q_reset_slope", 6.0))
         s_carry = float(ctx.get("pass_q_carry_slope", 5.0))
 
