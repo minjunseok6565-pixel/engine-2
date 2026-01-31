@@ -1252,6 +1252,7 @@ def simulate_possession(
                 p_putback = clamp(float(p_base) * float(skill_mult), p_min, p_max)
                 if rng.random() < p_putback:
                     action = "Putback"
+                    offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
                     ctx["force_actor_pid"] = getattr(rbd, "pid", None)
                     _refresh_action_tags(action, tags)
                     pass_chain = 0
@@ -1486,6 +1487,7 @@ def simulate_possession(
                 p_putback = clamp(float(p_base) * float(skill_mult), p_min, p_max)
                 if rng.random() < p_putback:
                     action = "Putback"
+                    offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
                     ctx["force_actor_pid"] = getattr(rbd, "pid", None)
                     _refresh_action_tags(action, tags)
                     pass_chain = 0
