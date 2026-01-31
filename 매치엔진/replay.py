@@ -184,6 +184,61 @@ def emit_event(
         - on_court_by_team_id ({home_team_id: [...], away_team_id: [...]})
         - lineup_version_by_team_id (dict copy, if present)
     """
+    # Calibration / fast-sim mode: allow callers to disable replay emission.
+    # IMPORTANT: return a *truthy* stub dict so callers that test "did an event occur?"
+    # (e.g. timeout/sub windows) keep identical control flow even when replay is disabled.
+    if getattr(game_state, "replay_disabled", False):
+        et = str(event_type).strip()
+        if not et:
+            raise ValueError("emit_event(): event_type must be a non-empty string")
+        stub: Dict[str, Any] = {
+            "event_type": et,
+            "replay_disabled": True,
+        }
+
+        # Minimal context (cheap snapshots; no heavy derived computations).
+        stub["quarter"] = _safe_int(getattr(game_state, "quarter", 1), 1)
+        stub["clock_sec"] = _fmt_clock_mmss(getattr(game_state, "clock_sec", 0.0))
+        stub["shot_clock_sec"] = _round_1dp(getattr(game_state, "shot_clock_sec", 0.0))
+
+        poss_idx = possession_index if possession_index is not None else getattr(game_state, "possession", 0)
+        stub["possession_index"] = _safe_int(poss_idx, 0)
+
+        # Team ids (best-effort; do not enforce SSOT contracts in disabled mode).
+        ht = str(getattr(game_state, "home_team_id", "") or "").strip()
+        at = str(getattr(game_state, "away_team_id", "") or "").strip()
+        if ht:
+            stub["home_team_id"] = ht
+        if at:
+            stub["away_team_id"] = at
+
+        # Score snapshot (cheap; best-effort).
+        try:
+            stub["score_home"] = _safe_int(getattr(home, "pts", 0) or 0, 0)
+            stub["score_away"] = _safe_int(getattr(away, "pts", 0) or 0, 0)
+        except Exception:
+            pass
+
+        # Flow keys (standardized names)
+        if pos_start is not None:
+            stub["pos_start"] = str(pos_start)
+        if pos_start_next is not None:
+            stub["pos_start_next"] = str(pos_start_next)
+        if pos_start_next_override is not None:
+            stub["pos_start_next_override"] = str(pos_start_next_override)
+
+        # Team mapping (echo inputs; no validation)
+        if team_id is not None:
+            s = str(team_id).strip()
+            if s:
+                stub["team_id"] = s
+        if opp_team_id is not None:
+            s = str(opp_team_id).strip()
+            if s:
+                stub["opp_team_id"] = s
+
+        return stub
+
     # Disallow accidental context overrides (prevents subtle duplicate/incorrect logs).
     bad = [k for k in payload.keys() if k in _RESERVED_KEYS]
     if bad:
