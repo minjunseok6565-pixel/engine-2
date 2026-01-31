@@ -1088,7 +1088,7 @@ def resolve_outcome(
                 else:  # TO_HANDLE_LOSS
                     base_steal = float(pm.get("steal_handle_loss_base", 0.72))
                     steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00
-                    p_lineout = clamp(0.10 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
+                    p_lineout = clamp(0.06 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
 
                 steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
                 p_steal = prob_from_scores(
