@@ -159,6 +159,56 @@ _STYLE_CACHE: "OrderedDict[Tuple[Any, ...], ShotDietStyle]" = OrderedDict()
 # Keep cache bounded to avoid unbounded growth across many possessions/games.
 _STYLE_CACHE_MAX: int = 2048
 
+# Cache session token (used to auto-clear the cache at game/experiment boundaries).
+#
+# Why this exists:
+# - In tuning/experiments you often keep the same on-court pids and only change player stats.
+# - The ShotDietStyle cache key intentionally does NOT include the full stat vector (for speed).
+# - Without an explicit reset, style results can appear to "stick" until eviction, which looks
+#   like a sudden jump/discontinuity when the cache eventually refreshes.
+#
+# We therefore auto-clear the cache whenever ctx["game_id"] changes.
+_STYLE_CACHE_SESSION_TOKEN: Optional[str] = None
+
+
+def _maybe_autoreset_style_cache(game_state: Any, ctx: Optional[Dict[str, Any]]) -> None:
+    """Auto-clear style cache at game/experiment boundaries.
+
+    Triggers:
+    - ctx["shot_diet_reset_cache"] (or legacy aliases) is truthy.
+    - ctx["game_id"] changes compared to the last observed non-empty value.
+
+    This is intentionally lightweight: a single string comparison per call.
+    """
+    global _STYLE_CACHE_SESSION_TOKEN
+
+    token: Optional[str] = None
+
+    # Explicit reset flag (useful for experiments that don't manage game_id).
+    if ctx and isinstance(ctx, dict):
+        if bool(ctx.get("shot_diet_reset_cache") or ctx.get("reset_shot_diet_cache") or ctx.get("_reset_shot_diet_cache")):
+            clear_style_cache()
+            # If a game_id exists, adopt it as the current session token after reset.
+            gid = ctx.get("game_id")
+            token = str(gid).strip() if gid is not None else None
+            _STYLE_CACHE_SESSION_TOKEN = token or None
+            return
+
+        gid = ctx.get("game_id")
+        token = str(gid).strip() if gid is not None else None
+
+    # Fallback: if a caller provides a game_id on game_state (non-standard), respect it.
+    if not token and game_state is not None:
+        gid2 = getattr(game_state, "game_id", None)
+        token = str(gid2).strip() if gid2 is not None else None
+
+    token = token or None
+    if token and token != _STYLE_CACHE_SESSION_TOKEN:
+        # New game/experiment session detected.
+        clear_style_cache()
+        _STYLE_CACHE_SESSION_TOKEN = token
+
+
 def _energy_bucket(val: Any) -> float:
     """Bucket player energy for cache key stability (fatigue-sensitive style)."""
     try:
@@ -389,6 +439,10 @@ def compute_shot_diet_style(
     Compute (or fetch from a bounded cache) style vector for current on-court matchup.
     Cache key: on-court pids + role hints + (bucketed) on-court energy (fatigue-sensitive).
     """
+    # Auto-clear cache at game/experiment boundaries so tuning changes cannot be masked
+    # by cached ShotDietStyle values.
+    _maybe_autoreset_style_cache(game_state, ctx)
+  
     # Sort by pid to ensure stable cache keys.
     off_sorted = sorted(offense.on_court_players(), key=lambda p: p.pid)
     def_sorted = sorted(defense.on_court_players(), key=lambda p: p.pid)
@@ -740,4 +794,11 @@ def get_action_multiplier_for_action(
 
 
 def clear_style_cache() -> None:
+    """Clear the global ShotDietStyle cache.
+
+    This is invoked automatically when ctx["game_id"] changes (game/experiment boundary),
+    and can also be triggered explicitly by passing ctx["shot_diet_reset_cache"]=True.
+    """
+    global _STYLE_CACHE_SESSION_TOKEN
     _STYLE_CACHE.clear()
+    _STYLE_CACHE_SESSION_TOKEN = None
