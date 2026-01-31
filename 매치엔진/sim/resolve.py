@@ -334,7 +334,7 @@ def _should_award_fastbreak_fg(ctx: dict, first_fga_sc) -> bool:
     if first_fga_sc is None:
         return False
     try:
-        return float(first_fga_sc) >= 14.0
+        return float(first_fga_sc) >= 15.0
     except Exception:
         return False
 
@@ -814,7 +814,7 @@ def resolve_outcome(
             q_score = 0.0
 
                 # Threshold buckets (score in [-2.5, +2.5])
-        t_to = float(ctx.get("pass_q_to", -0.55))
+        t_to = float(ctx.get("pass_q_to", -0.47))
         t_reset = float(ctx.get("pass_q_reset", -0.3))
         t_neg = float(ctx.get("pass_q_neg", -0.2))
         t_pos = float(ctx.get("pass_q_pos", 0.2))
