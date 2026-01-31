@@ -136,6 +136,161 @@ def role_fit_grade(role: str, fit: float) -> str:
         return "C"
     return "D"
 
+# -----------------------------
+# Continuous role-fit (anti-"step jump")
+# -----------------------------
+# The original implementation applies a discrete grade (S/A/B/C/D) chosen by hard cutoffs.
+# That can create noticeable discontinuities around thresholds.
+#
+# This module now supports a *continuous* role-fit coordinate `g` in [-2, +2]:
+#   D=-2, C=-1, B=0, A=+1, S=+2
+# and interpolates ROLE_PRIOR_MULT_RAW / ROLE_LOGIT_DELTA_RAW between adjacent grades
+# using a smoothstep blend.
+#
+# Design choices (defaults):
+#   - D-band lower bound is symmetric to the (C<->B) span: d_min = c_min - (b_min - c_min)
+#   - smoothing: smoothstep (t*t*(3-2*t)) within each grade interval
+#   - multi-participant aggregation: 0.70*min(g) + 0.30*avg(g)  (weakest-link weighted)
+# -----------------------------
+
+
+def _smoothstep01(t: float) -> float:
+    tt = clamp(t, 0.0, 1.0)
+    return tt * tt * (3.0 - 2.0 * tt)
+
+
+def _lerp(a: float, b: float, t: float) -> float:
+    return (1.0 - t) * float(a) + t * float(b)
+
+
+def _role_fit_default_cuts() -> Tuple[float, float, float, float]:
+    # Fallback when ROLE_FIT_CUTS is missing for a role.
+    # Mirrors the legacy default behavior where B/C/D were the only meaningful grades.
+    return (80.0, 72.0, 60.0, 52.0)
+
+
+def role_fit_g(role: str, fit: float) -> float:
+    """Continuous grade coordinate in [-2, +2] for a given (role, fit)."""
+    cuts = ROLE_FIT_CUTS.get(role) or _role_fit_default_cuts()
+    try:
+        s_min, a_min, b_min, c_min = [float(x) for x in cuts]
+    except Exception:
+        s_min, a_min, b_min, c_min = _role_fit_default_cuts()
+
+    # Defensive ordering checks; if malformed, fall back.
+    if not (s_min >= a_min >= b_min >= c_min):
+        s_min, a_min, b_min, c_min = _role_fit_default_cuts()
+
+    f = float(fit)
+
+    # Use a symmetric span below C so D->C is also continuous.
+    cb_span = max(1e-6, b_min - c_min)
+    d_min = c_min - cb_span
+
+    # D -> C in [d_min, c_min]
+    if f < d_min:
+        return -2.0
+    if f < c_min:
+        t = (f - d_min) / cb_span  # d_min -> 0, c_min -> 1
+        return _lerp(-2.0, -1.0, _smoothstep01(t))
+
+    # C -> B in [c_min, b_min]
+    if f < b_min:
+        t = (f - c_min) / cb_span  # c_min -> 0, b_min -> 1
+        return _lerp(-1.0, 0.0, _smoothstep01(t))
+
+    # B -> A in [b_min, a_min]
+    ba_span = max(1e-6, a_min - b_min)
+    if f < a_min:
+        t = (f - b_min) / ba_span
+        return _lerp(0.0, 1.0, _smoothstep01(t))
+
+    # A -> S in [a_min, s_min]
+    as_span = max(1e-6, s_min - a_min)
+    if f < s_min:
+        t = (f - a_min) / as_span
+        return _lerp(1.0, 2.0, _smoothstep01(t))
+
+    return 2.0
+
+
+def _grade_bucket_from_g(g: float) -> str:
+    """Nearest bucket label for a continuous grade coordinate."""
+    gg = clamp(g, -2.0, 2.0)
+    if gg >= 1.5:
+        return "S"
+    if gg >= 0.5:
+        return "A"
+    if gg >= -0.5:
+        return "B"
+    if gg >= -1.5:
+        return "C"
+    return "D"
+
+
+def _interp_grade_anchors(g: float, anchors: Dict[str, float]) -> float:
+    """Interpolate between D/C/B/A/S anchors using g in [-2, +2]."""
+    # Fill missing anchors defensively from B.
+    b = float(anchors.get("B", 1.0))
+    aD = float(anchors.get("D", b))
+    aC = float(anchors.get("C", b))
+    aB = b
+    aA = float(anchors.get("A", b))
+    aS = float(anchors.get("S", aA))
+
+    gg = clamp(g, -2.0, 2.0)
+
+    if gg <= -1.0:
+        # D(-2) <-> C(-1)
+        t = gg + 2.0  # [-2,-1] -> [0,1]
+        return _lerp(aD, aC, _smoothstep01(t))
+    if gg <= 0.0:
+        # C(-1) <-> B(0)
+        t = gg + 1.0  # [-1,0] -> [0,1]
+        return _lerp(aC, aB, _smoothstep01(t))
+    if gg <= 1.0:
+        # B(0) <-> A(1)
+        t = gg  # [0,1]
+        return _lerp(aB, aA, _smoothstep01(t))
+    # A(1) <-> S(2)
+    t = gg - 1.0  # [1,2] -> [0,1]
+    return _lerp(aA, aS, _smoothstep01(t))
+
+
+def _role_fit_mult_raw_by_g(g: float, cat: str) -> float:
+    """Interpolate ROLE_PRIOR_MULT_RAW by continuous grade coordinate."""
+    # Anchor table: grade -> {GOOD/BAD}
+    anchors: Dict[str, float] = {}
+    for gr in ["D", "C", "B", "A", "S"]:
+        try:
+            anchors[gr] = float(ROLE_PRIOR_MULT_RAW.get(gr, ROLE_PRIOR_MULT_RAW["B"]).get(cat, 1.0))
+        except Exception:
+            anchors[gr] = 1.0
+    return float(_interp_grade_anchors(g, anchors))
+
+
+def _role_fit_delta_raw_by_g(g: float) -> float:
+    anchors: Dict[str, float] = {}
+    for gr in ["D", "C", "B", "A", "S"]:
+        try:
+            anchors[gr] = float(ROLE_LOGIT_DELTA_RAW.get(gr, 0.0))
+        except Exception:
+            anchors[gr] = 0.0
+    return float(_interp_grade_anchors(g, anchors))
+
+
+def _effective_g_from_participants(participants: List[Tuple[str, Player, float]]) -> float:
+    if not participants:
+        return 0.0  # B
+    gs = [role_fit_g(r, f) for (r, _, f) in participants]
+    if not gs:
+        return 0.0
+    if len(gs) == 1:
+        return clamp(gs[0], -2.0, 2.0)
+    mn = min(gs)
+    av = sum(gs) / len(gs)
+    return clamp(0.70 * mn + 0.30 * av, -2.0, 2.0)
+
 
 def _get_role_fit_strength(offense: TeamState, role_fit_cfg: Optional[Dict[str, Any]] = None) -> float:
     try:
@@ -375,6 +530,13 @@ def apply_role_fit_to_priors_and_tags(
     fit_eff = _role_fit_effective_score(fits) if applied else 50.0
     grade = _effective_grade_from_participants(participants) if applied else "B"
 
+    # Backward-compatible discrete grade (worst-link) for counters/UI.
+    worst_grade = _effective_grade_from_participants(participants) if applied else "B"
+
+    # Continuous effective grade coordinate (used for interpolation).
+    g_eff = _effective_g_from_participants(participants) if applied else 0.0
+    grade_bucket = _grade_bucket_from_g(g_eff) if applied else "B"
+
     mults_applied: List[float] = []
 
     if applied and strength > 1e-9:
@@ -395,7 +557,7 @@ def apply_role_fit_to_priors_and_tags(
             if not cat:
                 continue
 
-            mult_raw = ROLE_PRIOR_MULT_RAW.get(grade, ROLE_PRIOR_MULT_RAW["B"])[cat]
+            mult_raw = _role_fit_mult_raw_by_g(g_eff, cat)
             mult_final = 1.0 + (0.60 * strength) * (float(mult_raw) - 1.0)
             priors[o] *= mult_final
             mults_applied.append(mult_final)
@@ -403,32 +565,58 @@ def apply_role_fit_to_priors_and_tags(
         priors = normalize_weights(priors)
 
     avg_mult_final = (sum(mults_applied) / len(mults_applied)) if mults_applied else 1.0
-    delta_raw = float(ROLE_LOGIT_DELTA_RAW.get(grade, 0.0))
+
+    mult_raw_good = float(_role_fit_mult_raw_by_g(g_eff, "GOOD")) if applied else float(
+        ROLE_PRIOR_MULT_RAW.get("B", ROLE_PRIOR_MULT_RAW["B"]).get("GOOD", 1.0)
+    )
+    mult_raw_bad = float(_role_fit_mult_raw_by_g(g_eff, "BAD")) if applied else float(
+        ROLE_PRIOR_MULT_RAW.get("B", ROLE_PRIOR_MULT_RAW["B"]).get("BAD", 1.0)
+    )
+
+    delta_raw = float(_role_fit_delta_raw_by_g(g_eff)) if applied else 0.0
     delta_final = (0.40 * strength) * delta_raw if applied else 0.0
 
     tags["role_fit_applied"] = bool(applied)
     tags["role_logit_delta"] = float(delta_final)
+    # Legacy fields (kept for compatibility)
     tags["role_fit_eff"] = float(fit_eff)
-    tags["role_fit_grade"] = str(grade)
+    tags["role_fit_grade"] = str(worst_grade)
+
+    # New continuous-debug fields
+    tags["role_fit_g_eff"] = float(g_eff)
+    tags["role_fit_grade_bucket"] = str(grade_bucket)
+    tags["role_fit_mult_raw_good"] = float(mult_raw_good)
+    tags["role_fit_mult_raw_bad"] = float(mult_raw_bad)
+    tags["role_fit_delta_raw"] = float(delta_raw)
 
     # internal debug (possession-step)
     if hasattr(offense, "role_fit_pos_log"):
+        # Keep this lightweight: store aggregate g information + role list.
+        g_list = [float(role_fit_g(r, f)) for (r, _, f) in participants] if applied else []
         offense.role_fit_pos_log.append(
             {
                 "action_family": str(action_family),
                 "applied": bool(applied),
                 "n_roles": int(len(participants)),
                 "fit_eff": float(fit_eff),
-                "grade": str(grade),
+                "worst_grade": str(worst_grade),
+                "grade_bucket": str(grade_bucket),
+                "g_eff": float(g_eff),
+                "g_min": float(min(g_list)) if g_list else 0.0,
+                "g_avg": float(sum(g_list) / len(g_list)) if g_list else 0.0,
                 "role_fit_strength": float(strength),
                 "avg_mult_final": float(avg_mult_final),
+                "mult_raw_good": float(mult_raw_good),
+                "mult_raw_bad": float(mult_raw_bad),
+                "delta_raw": float(delta_raw),
                 "delta_final": float(delta_final),
+                "roles": [str(r) for (r, _, _) in participants],
             }
         )
 
     # game-level aggregates (only when applied)
     if applied and hasattr(offense, "role_fit_grade_counts"):
-        offense.role_fit_grade_counts[grade] = offense.role_fit_grade_counts.get(grade, 0) + 1
+        offense.role_fit_grade_counts[worst_grade] = offense.role_fit_grade_counts.get(worst_grade, 0) + 1
     if applied and hasattr(offense, "role_fit_role_counts"):
         for r, _, _ in participants:
             offense.role_fit_role_counts[r] = offense.role_fit_role_counts.get(r, 0) + 1
