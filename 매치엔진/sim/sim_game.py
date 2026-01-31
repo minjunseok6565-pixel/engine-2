@@ -25,6 +25,7 @@ from .era import get_mvp_rules, load_era_config
 from .sim_clock import apply_dead_ball_cost
 from .sim_fatigue import _apply_break_recovery, _apply_fatigue_loss
 from .sim_rotation import (
+    _get_on_court,
     _init_targets,
     _update_minutes,
     ensure_rotation_v1_state,
@@ -130,8 +131,8 @@ def _choose_ot_start_offense(
         return home if rng.random() < 0.5 else away
 
     # default: jumpball
-    a_on = _get_on_court(game_state, home, home)
-    b_on = _get_on_court(game_state, away, home)
+    a_on = _get_on_court(home)
+    b_on = _get_on_court(away)
 
     def strength(team: TeamState, pids: List[str]) -> float:
         vals: List[float] = []
