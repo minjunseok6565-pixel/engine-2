@@ -139,15 +139,15 @@ OUTCOME_PROFILES: Dict[str, Dict[str, Dict[str, float]]] = {
 }
 
 SHOT_BASE = {
-    "SHOT_RIM_LAYUP": 0.55,
-    "SHOT_RIM_DUNK": 0.72,
-    "SHOT_RIM_CONTACT": 0.44,
+    "SHOT_RIM_LAYUP": 0.62,
+    "SHOT_RIM_DUNK": 0.78,
+    "SHOT_RIM_CONTACT": 0.5,
     "SHOT_TOUCH_FLOATER": 0.37,
     "SHOT_MID_CS": 0.41,
     "SHOT_MID_PU": 0.38,
     "SHOT_3_CS": 0.333,
     "SHOT_3_OD": 0.33,
-    "SHOT_POST": 0.44,
+    "SHOT_POST": 0.46,
 }
 
 # Chance that a 3PA is a corner 3 instead of ATB 3 (keyed by *base* action)
