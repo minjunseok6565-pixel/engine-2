@@ -21,7 +21,6 @@ class TacticsConfig:
     outcome_global_mult: Dict[str, float] = field(default_factory=dict)
     outcome_by_action_mult: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
-    def_action_weight_mult: Dict[str, float] = field(default_factory=dict)
     opp_action_weight_mult: Dict[str, float] = field(default_factory=dict)
 
     opp_outcome_global_mult: Dict[str, float] = field(default_factory=dict)
