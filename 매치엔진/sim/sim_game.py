@@ -260,6 +260,7 @@ def simulate_game(
     era: str = "default",
     strict_validation: bool = True,
     validation: Optional[ValidationConfig] = None,
+    replay_disabled: bool = False,
 ) -> Dict[str, Any]:
     """Simulate a full game with input validation/sanitization.
 
@@ -377,6 +378,10 @@ def simulate_game(
         rotation_checkpoint_mask={},
         rotation_checkpoint_quarter={},
     )
+    # Fast-sim / calibration runner can disable replay emission.
+    # NOTE: This must be set immediately after GameState creation so all emit_event()
+    # calls (including GAME_START) can observe it.
+    game_state.replay_disabled = bool(replay_disabled)
     # Initialize timeout state + flow trackers (safe no-ops if rules disable it)
     ensure_timeout_state(game_state, rules)
     ensure_rotation_v1_state(game_state, home, away, rules)
