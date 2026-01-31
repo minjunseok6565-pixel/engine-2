@@ -38,7 +38,7 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     "orb_base": 0.23,
 
     # FT model used in resolve_free_throws()
-    "ft_base": 0.45,
+    "ft_base": 0.52,
     "ft_range": 0.47,
     "ft_min": 0.40,
     "ft_max": 0.95,
@@ -70,11 +70,11 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
 
     # Putback modeling (ORB -> immediate try)
     # 'try' params are probabilities in [0..1] used at the ORB branch to choose a "Putback" action.
-    "putback_try_base_rim": 0.27,
-    "putback_try_base_post": 0.24,
-    "putback_try_base_mid": 0.14,
-    "putback_try_base_3": 0.08,
-    "putback_try_base_ft": 0.30,
+    "putback_try_base_rim": 0.20,
+    "putback_try_base_post": 0.18,
+    "putback_try_base_mid": 0.10,
+    "putback_try_base_3": 0.06,
+    "putback_try_base_ft": 0.22,
 
     # If the miss was blocked but stayed in-play, putback tries are less frequent (defender is attached).
     "putback_try_mult_blocked": 0.70,
