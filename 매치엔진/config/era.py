@@ -48,7 +48,7 @@ DEFAULT_PROB_MODEL: Dict[str, float] = {
     # combined with score/quality modulation (prob_from_scores) and contextual deltas.
     "steal_bad_pass_base": 0.72,
     "steal_handle_loss_base": 0.84,
-    "bad_pass_lineout_base": 0.30,
+    "bad_pass_lineout_base": 0.20,
 
     "block_base_rim": 0.085,
     "block_base_post": 0.065,
