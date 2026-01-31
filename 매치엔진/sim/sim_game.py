@@ -820,14 +820,14 @@ def simulate_game(
             off_fatigue_map = game_state.fatigue[off_team_id]
             def_fatigue_map = game_state.fatigue[def_team_id]
 
-            for p in off_players:
+            # Sync energy for the ENTIRE roster from fatigue SSOT.
+            # This prevents stale bench energy values from leaking into any stat reads.
+            for p in (getattr(offense, "lineup", None) or []):
                 p.energy = clamp(off_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
-            for p in def_players:
+            for p in (getattr(defense, "lineup", None) or []):
                 p.energy = clamp(def_fatigue_map.get(p.pid, 1.0), 0.0, 1.0)
 
             avg_off_fatigue = sum(off_fatigue_map.get(pid, 1.0) for pid in off_on_court) / max(len(off_on_court), 1)
-            avg_def_fatigue = sum(def_fatigue_map.get(pid, 1.0) for pid in def_on_court) / max(len(def_on_court), 1)
-            def_eff_mult = float(rules.get("fatigue_effects", {}).get("def_mult_min", 0.90)) + 0.10 * avg_def_fatigue
 
             bonus_threshold = (
                 int(rules.get("overtime_bonus_threshold", rules.get("bonus_threshold", 5)))
@@ -850,7 +850,6 @@ def simulate_game(
                 "fatigue_bad_bonus": float(rules.get("fatigue_effects", {}).get("bad_bonus", 0.08)),
                 "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
                 "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
-                "def_eff_mult": def_eff_mult,
                 "fatigue_map": off_fatigue_map,
                 "def_on_court": def_on_court,
                 "off_on_court": off_on_court,
