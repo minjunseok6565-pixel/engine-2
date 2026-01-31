@@ -504,7 +504,6 @@ def resolve_outcome(
     off_score = dot_profile(off_vals, prof["offense"])
     def_vals = {k: float(def_snap.get(k, 50.0)) for k in prof["defense"].keys()}
     def_score = dot_profile(def_vals, prof["defense"])
-    def_score *= float(ctx.get("def_eff_mult", 1.0))
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
     fatigue_logit_max = float(ctx.get("fatigue_logit_max", -0.25))
