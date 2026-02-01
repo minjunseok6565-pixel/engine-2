@@ -866,6 +866,14 @@ def simulate_game(
                 "first_fga_shotclock_sec": pos_first_fga_sc,
             }
 
+            # --- Possession time segmentation (supports in-possession forced subs) ---
+            # NOTE: sim_possession shallow-copies ctx (ctx = dict(ctx)), so these must be MUTABLE
+            # and updated in-place inside sim_possession to be visible here.
+            ctx["_seg_last_clock_sec"] = {"v": float(start_clock)}
+            ctx["_seg_off_on_court"] = list(off_on_court)
+            ctx["_seg_def_on_court"] = list(def_on_court)
+            ctx["_time_segments"] = []
+            
             # Setup time: admin / bring-up segments.
             # - Game clock always runs.
             # - Shot clock runs only for "live" starts (DRB/steal/live-TOV recovery/etc).
@@ -964,9 +972,6 @@ def simulate_game(
                     )
                 ctx["errors"] = []
 
-            elapsed = max(start_clock - game_state.clock_sec, 0.0)
-            _update_minutes(game_state, off_on_court, elapsed, offense, home)
-            _update_minutes(game_state, def_on_court, elapsed, defense, home)
 
             intensity_off = {
                 "transition_emphasis": bool(offense.tactics.context.get("TRANSITION_EMPHASIS", False)),
@@ -976,8 +981,55 @@ def simulate_game(
                 "transition_emphasis": bool(defense.tactics.context.get("TRANSITION_EMPHASIS", False)),
                 "heavy_pnr": bool(defense.tactics.context.get("HEAVY_PNR", False)) or "PnR" in defense.tactics.defense_scheme,
             }
-            _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed, home)
-            _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed, home)
+
+            # --- Apply minutes/fatigue by time segments (handles in-possession lineup changes) ---
+            segments = ctx.get("_time_segments") if isinstance(ctx, dict) else None
+            if not isinstance(segments, list):
+                segments = None
+
+            # Close final segment
+            try:
+                last_ref = ctx.get("_seg_last_clock_sec") if isinstance(ctx, dict) else None
+                if not isinstance(last_ref, dict):
+                    last_ref = {}
+                last_clock = float(last_ref.get("v", float(start_clock)))
+            except Exception:
+                last_clock = float(start_clock)
+
+            final_elapsed = max(last_clock - float(game_state.clock_sec), 0.0)
+            if segments is not None and final_elapsed > 0:
+                segments.append(
+                    {
+                        "elapsed": float(final_elapsed),
+                        "off": list(ctx.get("_seg_off_on_court") or off_on_court),
+                        "def": list(ctx.get("_seg_def_on_court") or def_on_court),
+                    }
+                )
+
+            if segments:
+                for seg in segments:
+                    try:
+                        seg_elapsed = float(seg.get("elapsed", 0.0))
+                    except Exception:
+                        seg_elapsed = 0.0
+                    if seg_elapsed <= 0:
+                        continue
+
+                    off_seg = list(seg.get("off") or off_on_court)
+                    def_seg = list(seg.get("def") or def_on_court)
+
+                    _update_minutes(game_state, off_seg, seg_elapsed, offense, home)
+                    _update_minutes(game_state, def_seg, seg_elapsed, defense, home)
+
+                    _apply_fatigue_loss(offense, off_seg, game_state, rules, intensity_off, seg_elapsed, home)
+                    _apply_fatigue_loss(defense, def_seg, game_state, rules, intensity_def, seg_elapsed, home)
+            else:
+                # Safety fallback
+                elapsed = max(float(start_clock) - float(game_state.clock_sec), 0.0)
+                _update_minutes(game_state, off_on_court, elapsed, offense, home)
+                _update_minutes(game_state, def_on_court, elapsed, defense, home)
+                _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed, home)
+                _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed, home)
 
             # Track possession-scope aggregates across dead-ball stop continuations.
             if bool(pos_res.get("had_orb", False)):
