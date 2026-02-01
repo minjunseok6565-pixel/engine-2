@@ -828,7 +828,7 @@ def resolve_outcome(
 
         # Probabilistic bucket 1: turnover chance increases as q_score drops below t_to.
         # Apply passer skill adjustment directly to the turnover logit (higher passer skill => fewer bad-pass TOs).
-        passer_span = float(ctx.get("pass_q_to_passer_logit_span", 0.0))
+        passer_span = float(ctx.get("pass_q_to_passer_logit_span", 0.6))
         compute_passer = bool(debug_q) or abs(passer_span) > 1e-12
 
         passer_bp = 50.0
