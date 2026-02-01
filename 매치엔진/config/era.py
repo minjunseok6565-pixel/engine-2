@@ -141,7 +141,8 @@ MVP_RULES = {
     "overtime_bonus_threshold": 4,  # 기존 2 -> 4 (NBA 스타일 기본값)
 
     # --- Break / rest modeling (does NOT consume game clock) ---
-    "break_sec_between_periods": 130,  # Q1->Q2, Q2->Q3, Q3->Q4
+    "break_sec_between_periods": 130,  # Q1->Q2, Q3->Q4
+    "break_sec_halftime": 180,         # Q2->Q3 (halftime)
     "break_sec_before_ot": 130,        # Regulation -> OT1, and between OTs
 
     # --- OT start possession ---
