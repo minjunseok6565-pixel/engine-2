@@ -1105,15 +1105,16 @@ def simulate_game(
         _apply_break_recovery(away, onB, game_state, rules, break_sec, home)
 
     break_between = float(rules.get("break_sec_between_periods", 0.0))
+    break_halftime = float(rules.get("break_sec_halftime", break_between))
     break_before_ot = float(rules.get("break_sec_before_ot", break_between))
 
     # Regulation
     for q in range(regulation_quarters):
         _play_period(q, float(quarter_length_sec))
 
-        # apply break after Q1/Q2/Q3 (not after Q4)
+        # apply break after Q1/Q2/Q3 (not after Q4): halftime (after Q2) uses break_halftime
         if q < regulation_quarters - 1:
-            _apply_period_break(break_between)
+            _apply_period_break(break_halftime if q == 1 else break_between)
 
     # If tie after regulation, apply break before OT1
     if home.pts == away.pts:
