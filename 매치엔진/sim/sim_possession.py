@@ -1165,7 +1165,32 @@ def simulate_possession(
 
                 if forced_out:
 
-                    maybe_substitute_deadball_v1(
+                    # --- segment close (minutes/fatigue accounting in sim_game) ---
+                    # NOTE: sim_possession shallow-copies ctx earlier (ctx = dict(ctx)),
+                    # so we must mutate shared objects in-place for sim_game to see changes.
+                    try:
+                        segments = ctx.get("_time_segments")
+                        last_ref = ctx.get("_seg_last_clock_sec")
+                        if isinstance(segments, list) and isinstance(last_ref, dict):
+                            now_clock = float(getattr(game_state, "clock_sec", 0.0))
+                            last_clock = float(last_ref.get("v", now_clock))
+                            seg_elapsed = max(last_clock - now_clock, 0.0)
+
+                            if seg_elapsed > 0:
+                                segments.append(
+                                    {
+                                        "elapsed": float(seg_elapsed),
+                                        "off": list(ctx.get("_seg_off_on_court") or ctx.get("off_on_court") or []),
+                                        "def": list(ctx.get("_seg_def_on_court") or ctx.get("def_on_court") or []),
+                                    }
+                                )
+
+                            # advance segment cursor (in-place so sim_game sees it)
+                            last_ref["v"] = now_clock
+                    except Exception as exc:
+                        _record_ctx_error("forced_sub.segment_close_pre", exc)
+
+                    changed = maybe_substitute_deadball_v1(
                         rng,
                         defense,
                         home_team,
@@ -1177,6 +1202,40 @@ def simulate_possession(
                         pressure_index=float(ctx.get("pressure_index", 0.0)),
                         garbage_index=float(ctx.get("garbage_index", 0.0)),
                     )
+
+                    # --- sync ctx lineup snapshots + invalidate lineup-based caches (remainder of possession) ---
+                    try:
+                        new_off = list(getattr(offense, "on_court_pids", []) or [])
+                        new_def = list(getattr(defense, "on_court_pids", []) or [])
+
+                        # resolve.py prefers ctx['*_on_court'] if present
+                        ctx["off_on_court"] = list(new_off)
+                        ctx["def_on_court"] = list(new_def)
+
+                        # segment state must be updated IN-PLACE (ctx is shallow-copied earlier)
+                        seg_off = ctx.get("_seg_off_on_court")
+                        if isinstance(seg_off, list):
+                            seg_off.clear()
+                            seg_off.extend(new_off)
+
+                        seg_def = ctx.get("_seg_def_on_court")
+                        if isinstance(seg_def, list):
+                            seg_def.clear()
+                            seg_def.extend(new_def)
+
+                        # invalidate role assignment cache (lineup-dependent)
+                        ctx.pop("def_role_players", None)
+                        ctx.pop("def_role_players_detail", None)
+
+                        # invalidate + recompute shot diet style immediately (lineup-dependent)
+                        ctx.pop("shot_diet_style", None)
+                        ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
+                            offense, defense, game_state=game_state, ctx=ctx
+                        )
+
+                        del changed  # not used beyond this point; keep explicit for clarity
+                    except Exception as exc:
+                        _record_ctx_error("forced_sub.ctx_sync_post", exc)
 
             except ValueError:
                 raise
