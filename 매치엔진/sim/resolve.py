@@ -827,7 +827,30 @@ def resolve_outcome(
         s_carry = float(ctx.get("pass_q_carry_slope", 5.0))
 
         # Probabilistic bucket 1: turnover chance increases as q_score drops below t_to.
-        p_to = float(sigmoid(s_to * (t_to - q_score)))
+        # Apply passer skill adjustment directly to the turnover logit (higher passer skill => fewer bad-pass TOs).
+        passer_span = float(ctx.get("pass_q_to_passer_logit_span", 0.0))
+        compute_passer = bool(debug_q) or abs(passer_span) > 1e-12
+
+        passer_bp = 50.0
+        bp_norm = 0.0
+        if compute_passer:
+            try:
+                prof = OUTCOME_PROFILES.get(outcome, {}).get("offense")
+                if not isinstance(prof, dict) or not prof:
+                    prof = OUTCOME_PROFILES.get("TO_BAD_PASS", {}).get("offense")
+                if isinstance(prof, dict) and prof:
+                    vals = {k: float(actor.get(k, fatigue_sensitive=True)) for k in prof.keys()}
+                    passer_bp = float(dot_profile(vals, prof, missing_default=50.0))
+                    bp_norm = float(clamp((passer_bp - 50.0) / 50.0, -1.0, 1.0))
+            except Exception as e:
+                _record_exception("pass_q_passer_bp", e)
+                passer_bp = 50.0
+                bp_norm = 0.0
+
+        to_logit_raw = float(s_to * (t_to - q_score))
+        to_logit_eff = float(to_logit_raw - (bp_norm * passer_span))
+        p_to = float(sigmoid(to_logit_eff))
+        p_to_raw = float(sigmoid(to_logit_raw)) if debug_q else None
         if rng.random() < p_to:
             offense.outcome_counts["TO_BAD_PASS"] = offense.outcome_counts.get("TO_BAD_PASS", 0) + 1
             offense.tov += 1
@@ -839,7 +862,12 @@ def resolve_outcome(
                         "q_score": q_score,
                         "q_detail": q_detail,
                         "thresholds": {"to": t_to, "reset": t_reset, "neg": t_neg, "pos": t_pos},
-                        "probs": {"p_to": float(p_to)},
+                        "passer_bp": float(passer_bp),
+                        "bp_norm": float(bp_norm),
+                        "passer_span": float(passer_span),
+                        "to_logit_raw": float(to_logit_raw),
+                        "to_logit_eff": float(to_logit_eff),
+                        "probs": {"p_to_raw": float(p_to_raw), "p_to": float(p_to)},
                         "slopes": {"to": float(s_to), "reset": float(s_reset), "carry": float(s_carry)},
                         "carry_in": float(carry_in),
                     }
@@ -906,7 +934,12 @@ def resolve_outcome(
                         "q_score": q_score,
                         "q_detail": q_detail,
                         "thresholds": {"to": t_to, "reset": t_reset, "neg": t_neg, "pos": t_pos},
-                        "probs": {"p_reset": float(p_reset)},
+                        "passer_bp": float(passer_bp),
+                        "bp_norm": float(bp_norm),
+                        "passer_span": float(passer_span),
+                        "to_logit_raw": float(to_logit_raw),
+                        "to_logit_eff": float(to_logit_eff),
+                        "probs": {"p_to": float(p_to), "p_to_raw": float(p_to_raw), "p_reset": float(p_reset)},
                         "slopes": {"to": float(s_to), "reset": float(s_reset), "carry": float(s_carry)},
                         "carry_in": float(carry_in),
                     }
@@ -958,12 +991,18 @@ def resolve_outcome(
                     {
                         "q_score": q_score,
                         "q_detail": q_detail,
+                        "passer_bp": float(passer_bp),
+                        "bp_norm": float(bp_norm),
+                        "passer_span": float(passer_span),
+                        "to_logit_raw": float(to_logit_raw),
+                        "to_logit_eff": float(to_logit_eff),
                         "thresholds": {"to": t_to, "reset": t_reset, "neg": t_neg, "pos": t_pos},
                         "carry_bucket": carry_bucket,
                         "carry_out": float(carry_out),
                         "carry_in": float(carry_in),
                         "probs": {
                             "p_to": float(p_to),
+                            "p_to_raw": float(p_to_raw),
                             "p_reset": float(p_reset),
                             "carry": {"neg": float(p_neg), "neu": float(p_neu), "pos": float(p_pos)},
                         },
