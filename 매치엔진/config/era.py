@@ -307,7 +307,7 @@ MVP_RULES = {
  
      # Recovery is optional; default off for v1 (can enable later)
      "timeout_recovery": {
-         "enabled": False,
+         "enabled": True,
          # "equivalent break seconds" to apply as recovery effect
          "equiv_break_sec": 12.0,
          "on_court_mult": 1.0,
