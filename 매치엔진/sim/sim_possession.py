@@ -1353,6 +1353,7 @@ def simulate_possession(
                     offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
                     ctx["force_actor_pid"] = getattr(rbd, "pid", None)
                     _refresh_action_tags(action, tags)
+                    fatigue_family_base = get_action_base(action, game_cfg)
                     pass_chain = 0
                     had_orb = True
                     stall_steps = _bump_stall(stall_steps, sc0, gc0)
@@ -1589,6 +1590,7 @@ def simulate_possession(
                     offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
                     ctx["force_actor_pid"] = getattr(rbd, "pid", None)
                     _refresh_action_tags(action, tags)
+                    fatigue_family_base = get_action_base(action, game_cfg)
                     pass_chain = 0
                     had_orb = True
                     stall_steps = _bump_stall(stall_steps, sc0, gc0)
@@ -1603,6 +1605,7 @@ def simulate_possession(
                 else:
                     action = "Drive"
                 _refresh_action_tags(action, tags)
+                fatigue_family_base = get_action_base(action, game_cfg)
                 pass_chain = 0
                 had_orb = True
                 stall_steps = _bump_stall(stall_steps, sc0, gc0)
@@ -1648,6 +1651,7 @@ def simulate_possession(
             if budget_now <= (min_release_window + 0.05) or (reset_cost * tm) >= max(0.0, budget_now - min_release_window):
                 action = "QuickShot"
                 _refresh_action_tags(action, tags)
+                fatigue_family_base = get_action_base(action, game_cfg)
                 pass_chain = 0
                 stall_steps = _bump_stall(stall_steps, sc0, gc0)
                 continue
@@ -1709,6 +1713,7 @@ def simulate_possession(
             action = choose_action_with_budget(rng, off_probs)
             offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
             _refresh_action_tags(action, tags)
+            fatigue_family_base = get_action_base(action, game_cfg)
             pass_chain = 0
             stall_steps = _bump_stall(stall_steps, sc0, gc0)
             continue
