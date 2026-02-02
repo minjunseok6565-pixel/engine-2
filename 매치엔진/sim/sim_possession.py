@@ -840,6 +840,32 @@ def simulate_possession(
     action = choose_action_with_budget(rng, off_probs)
     offense.off_action_counts[action] = offense.off_action_counts.get(action, 0) + 1
 
+    # --- Fatigue intensity tracking (per time-segment, visible to sim_game via ctx) ---
+    # Track a possession-level play family so follow-up time (kickouts/extra passes) is attributed
+    # to the initiating action family (e.g., PnR or TransitionEarly).
+    fatigue_family_base = get_action_base(action, game_cfg)
+
+    def _accumulate_fatigue_usage(delta_sec: float) -> None:
+        """Accumulate intensity usage time into ctx['_fatigue_seg_usage'].
+
+        Values are seconds spent in TransitionEarly or PnR/PnP/DHO play families within the
+        current time-segment. sim_game converts this into proportional fatigue multipliers.
+        """
+        try:
+            d = float(delta_sec)
+        except Exception:
+            return
+        if d <= 0:
+            return
+        u = ctx.get('_fatigue_seg_usage')
+        if not isinstance(u, dict):
+            return
+        base = str(fatigue_family_base or '')
+        if base == 'TransitionEarly':
+            u['transition_sec'] = float(u.get('transition_sec', 0.0) or 0.0) + d
+        if base in ('PnR', 'PnP', 'DHO'):
+            u['pnr_sec'] = float(u.get('pnr_sec', 0.0) or 0.0) + d
+
     tags = {
         "in_transition": (get_action_base(action, game_cfg) == "TransitionEarly"),
         "is_side_pnr": (action == "SideAnglePnR"),
@@ -887,6 +913,7 @@ def simulate_possession(
             action = "QuickShot"
             tags["forced_max_steps"] = True
             _refresh_action_tags(action, tags)
+            fatigue_family_base = get_action_base(action, game_cfg)
 
         action_cost = float(_estimate_action_cost_sec(action))
         # Clamp cost so we never consume more time than remains.
@@ -911,6 +938,11 @@ def simulate_possession(
             game_state.clock_sec = 0
         if game_state.shot_clock_sec < 0:
             game_state.shot_clock_sec = 0
+
+        # Track how much game-clock time elapsed in this iteration for fatigue-intensity attribution.
+        delta_gc = max(float(gc0) - float(game_state.clock_sec), 0.0)
+        if delta_gc > 0:
+            _accumulate_fatigue_usage(delta_gc)
 
         clock_expired = (game_state.clock_sec <= 0)
         shotclock_expired = (game_state.shot_clock_sec <= 0)
@@ -1182,11 +1214,17 @@ def simulate_possession(
                                         "elapsed": float(seg_elapsed),
                                         "off": list(ctx.get("_seg_off_on_court") or ctx.get("off_on_court") or []),
                                         "def": list(ctx.get("_seg_def_on_court") or ctx.get("def_on_court") or []),
+                                        "fatigue_usage": dict((ctx.get('_fatigue_seg_usage') or {}) if isinstance(ctx, dict) else {}),
                                     }
                                 )
 
                             # advance segment cursor (in-place so sim_game sees it)
                             last_ref["v"] = now_clock
+                            # Reset per-segment intensity usage so the next segment starts clean.
+                            uref = ctx.get('_fatigue_seg_usage')
+                            if isinstance(uref, dict):
+                                uref['transition_sec'] = 0.0
+                                uref['pnr_sec'] = 0.0
                     except Exception as exc:
                         _record_ctx_error("forced_sub.segment_close_pre", exc)
 
@@ -1327,6 +1365,7 @@ def simulate_possession(
                 else:
                     action = "Drive"
                 _refresh_action_tags(action, tags)
+                fatigue_family_base = get_action_base(action, game_cfg)
                 pass_chain = 0
                 had_orb = True
                 stall_steps = _bump_stall(stall_steps, sc0, gc0)
@@ -1613,11 +1652,17 @@ def simulate_possession(
                 continue
                 
             if reset_cost > 0:
+                # Reset itself should not inherit the prior PnR/Transition family.
+                fatigue_family_base = 'Reset'
+                gc_before = float(game_state.clock_sec)
                 apply_time_cost(game_state, reset_cost, tempo_mult)
                 if game_state.clock_sec < 0:
                     game_state.clock_sec = 0
                 if game_state.shot_clock_sec < 0:
                     game_state.shot_clock_sec = 0
+                delta_reset = max(gc_before - float(game_state.clock_sec), 0.0)
+                if delta_reset > 0:
+                    _accumulate_fatigue_usage(delta_reset)
                     
                 if game_state.shot_clock_sec <= 0:
                     commit_shot_clock_turnover(offense)
@@ -1694,11 +1739,16 @@ def simulate_possession(
                     force_quick_after_pass = True
 
             if pass_cost_apply > 0.0:
+                gc_before = float(game_state.clock_sec)
                 apply_time_cost(game_state, pass_cost_apply, tempo_mult)
                 if game_state.clock_sec < 0:
                     game_state.clock_sec = 0
                 if game_state.shot_clock_sec < 0:
                     game_state.shot_clock_sec = 0
+
+                delta_pass = max(gc_before - float(game_state.clock_sec), 0.0)
+                if delta_pass > 0:
+                    _accumulate_fatigue_usage(delta_pass)
                     
                 if game_state.shot_clock_sec <= 0:
                     # Drop any staged pass event to avoid leaking into the next possession.
@@ -1737,6 +1787,15 @@ def simulate_possession(
                 action = choose_action_with_budget(rng, {"Drive": 0.40, "Kickout": 0.60})
             else:
                 action = choose_action_with_budget(rng, off_probs)
+
+            # If we newly enter a high-intensity family mid-possession, switch the family so
+            # subsequent time is attributed correctly (prevents missing late PnR/transition).
+            try:
+                new_base = get_action_base(action, game_cfg)
+            except Exception:
+                new_base = ''
+            if str(fatigue_family_base or '') not in ('TransitionEarly', 'PnR', 'PnP', 'DHO') and new_base in ('TransitionEarly', 'PnR', 'PnP', 'DHO'):
+                fatigue_family_base = new_base
 
             if (not force_quick_after_pass) and pass_chain >= 3:
                 # After a long pass chain, bias toward a shot attempt.
