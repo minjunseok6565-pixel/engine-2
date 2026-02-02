@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 
 from .core import apply_min_floor, apply_multipliers, apply_temperature, clamp, normalize_weights
 from .era import get_defense_meta_params
-from .tactics import TacticsConfig
+from .tactics import TacticsConfig, canonical_defense_scheme
 
 if TYPE_CHECKING:
     from .game_config import GameConfig
@@ -107,21 +107,7 @@ def build_offense_action_probs(
     temp = float(meta.get("defense_meta_temperature", 1.10))
     floor = float(meta.get("defense_meta_floor", 0.03))
 
-    scheme_map = {
-        "Switch": "Switch_Everything",
-        "SwitchEverything": "Switch_Everything",
-        "Switch_Everything": "Switch_Everything",
-        "Drop": "Drop",
-        "Hedge_ShowRecover": "Hedge_ShowRecover",
-        "Hedge": "Hedge_ShowRecover",
-        "Blitz_TrapPnR": "Blitz_TrapPnR",
-        "ICE_SidePnR": "ICE_SidePnR",
-        "ICE": "ICE_SidePnR",
-        "Zone": "Zone",
-        "Matchup_Zone": "Zone",
-        "PackLine_GapHelp": "PackLine_GapHelp",
-    }
-    scheme = scheme_map.get(getattr(def_tac, "defense_scheme", ""), getattr(def_tac, "defense_scheme", ""))
+    scheme = canonical_defense_scheme(getattr(def_tac, "defense_scheme", ""))
     meta_mults = tables.get(scheme, {})
     for a, mult in meta_mults.items():
         mult_final = clamp(1.0 + (float(mult) - 1.0) * strength, lo, hi)
@@ -186,15 +172,17 @@ def build_outcome_priors(
     pri = apply_multipliers_typesafe(pri, def_tac.opp_outcome_by_action_mult.get(action, {}))
     pri = apply_multipliers_typesafe(pri, def_tac.opp_outcome_by_action_mult.get(base_action, {}))
 
+    def_scheme = canonical_defense_scheme(getattr(def_tac, "defense_scheme", ""))
+
     # defense scheme
     def_mult = game_cfg.defense_scheme_mult if isinstance(game_cfg.defense_scheme_mult, Mapping) else {}
-    dm = def_mult.get(def_tac.defense_scheme, {}).get(action) or def_mult.get(def_tac.defense_scheme, {}).get(base_action) or {}
+    dm = def_mult.get(def_scheme, {}).get(action) or def_mult.get(def_scheme, {}).get(base_action) or {}
     for o, m in dm.items():
         if o in pri:
             pri[o] *= effective_scheme_multiplier(m, def_tac.def_scheme_outcome_strength)
 
     # conditional (MVP subset)
-    if def_tac.defense_scheme == "ICE_SidePnR" and tags.get("is_side_pnr", False):
+    if def_scheme == "ICE_SidePnR" and tags.get("is_side_pnr", False):
         for o in ("RESET_RESREEN","PASS_KICKOUT"):
             if o in pri:
                 pri[o] *= 1.03
@@ -227,22 +215,7 @@ def build_outcome_priors(
 
     meta = get_defense_meta_params()
     rules = meta.get("defense_meta_priors_rules", {})
-    scheme_map = {
-        "Switch": "Switch_Everything",
-        "SwitchEverything": "Switch_Everything",
-        "Switch_Everything": "Switch_Everything",
-        "Drop": "Drop",
-        "Hedge_ShowRecover": "Hedge_ShowRecover",
-        "Hedge": "Hedge_ShowRecover",
-        "Blitz_TrapPnR": "Blitz_TrapPnR",
-        "ICE_SidePnR": "ICE_SidePnR",
-        "ICE": "ICE_SidePnR",
-        "Zone": "Zone",
-        "Matchup_Zone": "Zone",
-        "PackLine_GapHelp": "PackLine_GapHelp",
-    }
-    scheme = scheme_map.get(getattr(def_tac, "defense_scheme", ""), getattr(def_tac, "defense_scheme", ""))
-    for rule in rules.get(scheme, []):
+    for rule in rules.get(def_scheme, []):
         target = rule.get("key")
         if not target:
             continue
