@@ -181,7 +181,16 @@ MVP_RULES = {
         "bench_sec": 8 * 60,
     },
     "fatigue_effects": {
+        # Base fatigue logit (applies broadly)
         "logit_delta_max": -0.25,
+
+        # Red-zone extra logit penalty (only when energy < logit_red_crit)
+        # - logit_red_max is additional negative logit at energy=0
+        # - logit_red_pow controls acceleration into red zone
+        "logit_red_crit": 0.30,
+        "logit_red_max": -0.20,
+        "logit_red_pow": 1.6,
+        
         "bad_mult_max": 1.12,
         "bad_critical": 0.25,
         "bad_bonus": 0.08,
