@@ -85,12 +85,25 @@ def _role_score(player: Any, role_profile: Mapping[str, float], *, get_stat: Cal
 
 
 def _extract_fixed_roles(defense: TeamState, roles: Sequence[str]) -> Dict[str, Player]:
-    """Return fixed role assignments from defense.roles if present and valid."""
+    """Return fixed role assignments from defense.roles if present and valid.
+
+    Safety contract:
+    - A fixed role pid is only honored if that player is currently on the court.
+      (Roles are scheme-roles for the *active* 5-man unit, not the full lineup.)
+    """
     fixed: Dict[str, Player] = {}
     for r in roles:
-        pid = defense.roles.get(r)
+        pid_raw = defense.roles.get(r)
+        if not pid_raw:
+            continue
+        pid = str(pid_raw).strip()
         if not pid:
             continue
+
+        # Do NOT honor fixed roles for off-court players.
+        if not defense.is_on_court(pid):
+            continue
+        
         p = defense.find_player(pid)
         if p is not None:
             fixed[r] = p
@@ -254,7 +267,7 @@ def get_or_build_def_role_players(
         role_players: Dict[str, Player] = {}
         for role, pid in detail.assignment.items():
             p = defense.find_player(pid)
-            if p is not None:
+            if p is not None and defense.is_on_court(p.pid):
                 role_players[role] = p
         ctx[cache_key] = role_players
         ctx[debug_detail_key] = detail
