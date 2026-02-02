@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from .core import clamp
 from .models import DERIVED_DEFAULT, Player, TeamState, ROLE_FALLBACK_RANK
-from .tactics import TacticsConfig
+from .tactics import TacticsConfig, canonical_defense_scheme
 
 if TYPE_CHECKING:
     from .game_config import GameConfig
@@ -234,6 +234,10 @@ def sanitize_tactics_config(
     """Mutates tactics in-place: clamps all UI knobs and ignores unknown keys."""
 
     allowed = build_allowed_sets(game_cfg)
+
+    # Canonicalize defense scheme early so that all downstream validation and
+    # engine tables can rely on a single canonical key.
+    tac.defense_scheme = canonical_defense_scheme(getattr(tac, "defense_scheme", ""))
 
     if tac.offense_scheme not in allowed.offense_schemes:
         msg = f"{label}.offense_scheme: unknown scheme '{tac.offense_scheme}'"
