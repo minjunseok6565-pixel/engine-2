@@ -873,6 +873,7 @@ def simulate_game(
             ctx["_seg_off_on_court"] = list(off_on_court)
             ctx["_seg_def_on_court"] = list(def_on_court)
             ctx["_time_segments"] = []
+            ctx["_fatigue_seg_usage"] = {"transition_sec": 0.0, "pnr_sec": 0.0}
             
             # Setup time: admin / bring-up segments.
             # - Game clock always runs.
@@ -973,14 +974,25 @@ def simulate_game(
                 ctx["errors"] = []
 
 
-            intensity_off = {
-                "transition_emphasis": bool(offense.tactics.context.get("TRANSITION_EMPHASIS", False)),
-                "heavy_pnr": bool(offense.tactics.context.get("HEAVY_PNR", False)) or "PnR" in offense.tactics.offense_scheme,
-            }
-            intensity_def = {
-                "transition_emphasis": bool(defense.tactics.context.get("TRANSITION_EMPHASIS", False)),
-                "heavy_pnr": bool(defense.tactics.context.get("HEAVY_PNR", False)) or "PnR" in defense.tactics.defense_scheme,
-            }
+            # Fatigue intensity is derived from actual in-possession usage (tracked in sim_possession)
+            # and applied proportionally per time-segment.
+            def _intensity_from_usage(usage, seg_elapsed: float):
+                try:
+                    e = float(seg_elapsed)
+                except Exception:
+                    e = 0.0
+                if e <= 0:
+                    return {"transition_emphasis": 0.0, "heavy_pnr": 0.0}
+                try:
+                    u = usage if isinstance(usage, dict) else {}
+                    t = float(u.get("transition_sec", 0.0) or 0.0)
+                    p = float(u.get("pnr_sec", 0.0) or 0.0)
+                except Exception:
+                    t, p = 0.0, 0.0
+                return {
+                    "transition_emphasis": clamp(t / e, 0.0, 1.0),
+                    "heavy_pnr": clamp(p / e, 0.0, 1.0),
+                }
 
             # --- Apply minutes/fatigue by time segments (handles in-possession lineup changes) ---
             segments = ctx.get("_time_segments") if isinstance(ctx, dict) else None
@@ -1003,6 +1015,7 @@ def simulate_game(
                         "elapsed": float(final_elapsed),
                         "off": list(ctx.get("_seg_off_on_court") or off_on_court),
                         "def": list(ctx.get("_seg_def_on_court") or def_on_court),
+                        "fatigue_usage": dict((ctx.get("_fatigue_seg_usage") or {}) if isinstance(ctx, dict) else {}),
                     }
                 )
 
@@ -1021,16 +1034,18 @@ def simulate_game(
                     _update_minutes(game_state, off_seg, seg_elapsed, offense, home)
                     _update_minutes(game_state, def_seg, seg_elapsed, defense, home)
 
-                    _apply_fatigue_loss(offense, off_seg, game_state, rules, intensity_off, seg_elapsed, home)
-                    _apply_fatigue_loss(defense, def_seg, game_state, rules, intensity_def, seg_elapsed, home)
+                    seg_intensity = _intensity_from_usage(seg.get("fatigue_usage"), seg_elapsed)
+
+                    _apply_fatigue_loss(offense, off_seg, game_state, rules, seg_intensity, seg_elapsed, home)
+                    _apply_fatigue_loss(defense, def_seg, game_state, rules, seg_intensity, seg_elapsed, home)
             else:
                 # Safety fallback
                 elapsed = max(float(start_clock) - float(game_state.clock_sec), 0.0)
                 _update_minutes(game_state, off_on_court, elapsed, offense, home)
                 _update_minutes(game_state, def_on_court, elapsed, defense, home)
-                _apply_fatigue_loss(offense, off_on_court, game_state, rules, intensity_off, elapsed, home)
-                _apply_fatigue_loss(defense, def_on_court, game_state, rules, intensity_def, elapsed, home)
-
+                fb_intensity = _intensity_from_usage((ctx.get("_fatigue_seg_usage") if isinstance(ctx, dict) else None), elapsed)
+                _apply_fatigue_loss(offense, off_on_court, game_state, rules, fb_intensity, elapsed, home)
+                _apply_fatigue_loss(defense, def_on_court, game_state, rules, fb_intensity, elapsed, home)
             # Track possession-scope aggregates across dead-ball stop continuations.
             if bool(pos_res.get("had_orb", False)):
                 pos_had_orb = True
