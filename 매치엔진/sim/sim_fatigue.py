@@ -140,7 +140,7 @@ def _apply_fatigue_loss(
     on_court: List[str],
     game_state: GameState,
     rules: Dict[str, Any],
-    intensity: Dict[str, bool],
+    intensity: Mapping[str, Any],
     elapsed_sec: float,  # ★ 추가: 실제 흘러간 시간(초)
     home: TeamState,  # legacy callsites may pass this; NOT used for mapping (SSOT is team.team_id)
 ) -> None:
@@ -188,10 +188,20 @@ def _apply_fatigue_loss(
         # 기존 룰(포제션당 소모)을 시간 비례로 변환
         loss = _fatigue_loss_for_role(role, rules) * (float(elapsed_sec) / ref_sec)
 
-        if intensity.get("transition_emphasis"):
-            loss += float(rules.get("fatigue_loss", {}).get("transition_emphasis", 0.001)) * (float(elapsed_sec) / ref_sec)
-        if intensity.get("heavy_pnr") and role in ("handler", "big"):
-            loss += float(rules.get("fatigue_loss", {}).get("heavy_pnr", 0.001)) * (float(elapsed_sec) / ref_sec)
+        # Intensity values may be booleans (legacy) or floats in [0,1] (weighted).
+        try:
+            trans_w = float(intensity.get("transition_emphasis", 0.0) or 0.0)
+        except Exception:
+            trans_w = 0.0
+        try:
+            pnr_w = float(intensity.get("heavy_pnr", 0.0) or 0.0)
+        except Exception:
+            pnr_w = 0.0
+
+        if trans_w > 0.0:
+            loss += trans_w * float(rules.get("fatigue_loss", {}).get("transition_emphasis", 0.001)) * (float(elapsed_sec) / ref_sec)
+        if pnr_w > 0.0 and role in ("handler", "big"):
+            loss += pnr_w * float(rules.get("fatigue_loss", {}).get("heavy_pnr", 0.001)) * (float(elapsed_sec) / ref_sec)
 
         c01 = cap01(pid)
         loss *= lerp(drain_lo, drain_hi, c01)
