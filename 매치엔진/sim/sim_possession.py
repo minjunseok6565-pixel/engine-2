@@ -1242,38 +1242,39 @@ def simulate_possession(
                     )
 
                     # --- sync ctx lineup snapshots + invalidate lineup-based caches (remainder of possession) ---
-                    try:
-                        new_off = list(getattr(offense, "on_court_pids", []) or [])
-                        new_def = list(getattr(defense, "on_court_pids", []) or [])
+                    if changed:
+                        try:
+                            new_off = list(getattr(offense, "on_court_pids", []) or [])
+                            new_def = list(getattr(defense, "on_court_pids", []) or [])
 
-                        # resolve.py prefers ctx['*_on_court'] if present
-                        ctx["off_on_court"] = list(new_off)
-                        ctx["def_on_court"] = list(new_def)
+                            # resolve.py prefers ctx['*_on_court'] if present
+                            ctx["off_on_court"] = list(new_off)
+                            ctx["def_on_court"] = list(new_def)
 
-                        # segment state must be updated IN-PLACE (ctx is shallow-copied earlier)
-                        seg_off = ctx.get("_seg_off_on_court")
-                        if isinstance(seg_off, list):
-                            seg_off.clear()
-                            seg_off.extend(new_off)
+                            # segment state must be updated IN-PLACE (ctx is shallow-copied earlier)
+                            seg_off = ctx.get("_seg_off_on_court")
+                            if isinstance(seg_off, list):
+                                seg_off.clear()
+                                seg_off.extend(new_off)
 
-                        seg_def = ctx.get("_seg_def_on_court")
-                        if isinstance(seg_def, list):
-                            seg_def.clear()
-                            seg_def.extend(new_def)
+                            seg_def = ctx.get("_seg_def_on_court")
+                            if isinstance(seg_def, list):
+                                seg_def.clear()
+                                seg_def.extend(new_def)
 
-                        # invalidate role assignment cache (lineup-dependent)
-                        ctx.pop("def_role_players", None)
-                        ctx.pop("def_role_players_detail", None)
+                            # invalidate role assignment cache (lineup-dependent)
+                            ctx.pop("def_role_players", None)
+                            ctx.pop("def_role_players_detail", None)
 
-                        # invalidate + recompute shot diet style immediately (lineup-dependent)
-                        ctx.pop("shot_diet_style", None)
-                        ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
-                            offense, defense, game_state=game_state, ctx=ctx
-                        )
+                            # invalidate + recompute shot diet style immediately (lineup-dependent)
+                            ctx.pop("shot_diet_style", None)
+                            ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
+                                offense, defense, game_state=game_state, ctx=ctx
+                            )
 
-                        del changed  # not used beyond this point; keep explicit for clarity
-                    except Exception as exc:
-                        _record_ctx_error("forced_sub.ctx_sync_post", exc)
+                            del changed  # not used beyond this point; keep explicit for clarity
+                        except Exception as exc:
+                            _record_ctx_error("forced_sub.ctx_sync_post", exc)
 
             except ValueError:
                 raise
