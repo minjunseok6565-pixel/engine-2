@@ -90,8 +90,10 @@ def _extract_fixed_roles(defense: TeamState, roles: Sequence[str]) -> Dict[str, 
     Safety contract:
     - A fixed role pid is only honored if that player is currently on the court.
       (Roles are scheme-roles for the *active* 5-man unit, not the full lineup.)
+    - A single pid cannot be honored for multiple roles; duplicates are an error.
     """
     fixed: Dict[str, Player] = {}
+    pid_to_roles: dict[str, list[str]] = {}
     for r in roles:
         pid_raw = defense.roles.get(r)
         if not pid_raw:
@@ -107,6 +109,16 @@ def _extract_fixed_roles(defense: TeamState, roles: Sequence[str]) -> Dict[str, 
         p = defense.find_player(pid)
         if p is not None:
             fixed[r] = p
+            pid_to_roles.setdefault(p.pid, []).append(r)
+
+    # Fail fast if the same on-court pid is assigned to multiple scheme-roles.
+    dups = {pid: rs for pid, rs in pid_to_roles.items() if len(rs) > 1}
+    if dups:
+        details = "; ".join(f"{pid} -> {', '.join(rs)}" for pid, rs in sorted(dups.items()))
+        raise ValueError(
+            "Manual defense role overrides contain duplicate pid(s): "
+            f"{details}. Each on-court player can be assigned to at most one defensive role."
+        )
     return fixed
 
 
