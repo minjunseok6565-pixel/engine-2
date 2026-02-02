@@ -22,13 +22,17 @@ from .core import clamp
 # ---------------------------------------------------------------------------
 
 # Base profile (대부분의 스탯)
-FATIGUE_PROFILE_BASE = {"floor": 0.78, "gamma": 1.9}
+# - floor: 레드존(crit_e 이상)에서의 기본 하한
+# - gamma: 곡선 형태(에너지 감소에 따른 하락 기울기)
+# - floor_min: 레드존에서 energy=0에 가까울수록 추가로 내려가는 최저 하한
+# - crit_e / crit_pow: 레드존 시작점 및 가속 곡선
+FATIGUE_PROFILE_BASE = {"floor": 0.83, "gamma": 1.15, "floor_min": 0.58, "crit_e": 0.26, "crit_pow": 1.5}
 
 # High sensitivity (피로 영향 큼): 수비/핸들/패스/3점
-FATIGUE_PROFILE_HIGH = {"floor": 0.74, "gamma": 2.2}
+FATIGUE_PROFILE_HIGH = {"floor": 0.80, "gamma": 1.20, "floor_min": 0.52, "crit_e": 0.28, "crit_pow": 1.6}
 
 # Low sensitivity (피로 영향 적음): 포스트/피지컬
-FATIGUE_PROFILE_LOW = {"floor": 0.84, "gamma": 1.6}
+FATIGUE_PROFILE_LOW = {"floor": 0.88, "gamma": 1.05, "floor_min": 0.70, "crit_e": 0.24, "crit_pow": 1.4}
 
 # Exact key overrides (정확히 이 키면 우선 적용)
 _FATIGUE_HIGH_EXACT = {
@@ -78,11 +82,27 @@ def _fatigue_scale(key: str, energy: float) -> float:
     """
     e = clamp(float(energy), 0.0, 1.0)
     prof = _fatigue_profile_for_key(key)
-    floor = float(prof["floor"])
-    gamma = float(prof["gamma"])
+    floor = float(prof.get("floor", 0.78))
+    gamma = float(prof.get("gamma", 1.9))
 
-    # 9-A nonlinear curve: floor + (1-floor) * (energy^gamma)
-    scale = floor + (1.0 - floor) * (e ** gamma)
+    # Red-zone dynamic floor:
+    # - energy < crit_e 구간에서만 floor가 floor_min 방향으로 추가 하락
+    # - crit_pow로 레드존 가속 정도를 조절
+    crit_e = float(prof.get("crit_e", 0.0))
+    floor_min = float(prof.get("floor_min", floor))
+    crit_pow = float(prof.get("crit_pow", 1.0))
+
+    # safety: floor_min cannot exceed floor
+    if floor_min > floor:
+        floor_min = floor
+
+    floor_eff = floor
+    if crit_e > 1e-9 and e < crit_e:
+        t = (crit_e - e) / crit_e  # 0 at crit_e, 1 at 0
+        floor_eff = floor - (floor - floor_min) * (t ** crit_pow)
+
+    # nonlinear curve: floor_eff + (1-floor_eff) * (energy^gamma)
+    scale = floor_eff + (1.0 - floor_eff) * (e ** gamma)
     return clamp(scale, 0.0, 1.0)
 
 
