@@ -507,8 +507,25 @@ def resolve_outcome(
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
     fatigue_logit_max = float(ctx.get("fatigue_logit_max", -0.25))
-    fatigue_val = float(fatigue_map.get(actor.pid, 1.0))
+
+    # Prefer actor.energy when available; fallback to ctx fatigue_map for back-compat.
+    try:
+        fatigue_val = float(getattr(actor, "energy", fatigue_map.get(actor.pid, 1.0)))
+    except Exception:
+        fatigue_val = float(fatigue_map.get(actor.pid, 1.0))
+    fatigue_val = clamp(fatigue_val, 0.0, 1.0)
+
+    # Base linear penalty (existing behavior)
     fatigue_logit_delta = (1.0 - fatigue_val) * fatigue_logit_max
+
+    # Red-zone extra penalty (new): only applies when energy < crit.
+    crit = float(ctx.get("fatigue_logit_red_crit", 0.0) or 0.0)
+    red_max = float(ctx.get("fatigue_logit_red_max", 0.0) or 0.0)
+    red_pow = float(ctx.get("fatigue_logit_red_pow", 1.0) or 1.0)
+
+    if crit > 1e-9 and red_max != 0.0 and fatigue_val < crit:
+        t = (crit - fatigue_val) / crit  # 0..1
+        fatigue_logit_delta += (t ** red_pow) * red_max
 
     # PASS-carry: applied once to the *next* shot/pass (and optionally shooting-foul) and then consumed.
     carry_in = 0.0
@@ -773,6 +790,7 @@ def resolve_outcome(
             kind="pass",
             variance_mult=variance_mult,
             logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in),
+            fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
 
