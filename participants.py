@@ -850,7 +850,7 @@ def _estat(p: Player, key: str) -> float:
     return _event_assign_norm01(p.get(key, fatigue_sensitive=True))
 
 
-def choose_stealer_pid(rng: random.Random, defense: TeamState) -> Optional[str]:
+def choose_stealer_pid(rng: random.Random, defense: TeamState, prefer_pid: Optional[str] = None) -> Optional[str]:
     """Choose a defender pid to be credited with a steal.
 
     Intended to be used after the resolve layer decides a turnover is a steal.
@@ -858,6 +858,7 @@ def choose_stealer_pid(rng: random.Random, defense: TeamState) -> Optional[str]:
     Tuning via defense.tactics.context:
       - STEAL_ASSIGN_POWER (default 1.6)
       - STEAL_ASSIGN_W_MIN (default 0.05)
+      - STEAL_ASSIGN_PRIMARY_MULT (default 1.35)
     """
     cand = list(_active(defense))
     if not cand:
@@ -877,12 +878,19 @@ def choose_stealer_pid(rng: random.Random, defense: TeamState) -> Optional[str]:
         w = 0.60 * steal + 0.25 * poa + 0.15 * help_
         weights[p.pid] = max(float(w), float(w_min)) ** float(power)
 
+    primary_mult = float(ctx.get('STEAL_ASSIGN_PRIMARY_MULT', 1.35))
+    primary_mult = max(primary_mult, 0.0)
+    if prefer_pid and prefer_pid in weights:
+        weights[prefer_pid] *= max(primary_mult, 1.0)
+
     if sum(max(w, 0.0) for w in weights.values()) <= 1e-12:
         return rng.choice([p.pid for p in cand])
     return weighted_choice(rng, weights)
 
 
-def choose_blocker_pid(rng: random.Random, defense: TeamState, shot_kind: str) -> Optional[str]:
+def choose_blocker_pid(
+    rng: random.Random, defense: TeamState, shot_kind: str, prefer_pid: Optional[str] = None
+) -> Optional[str]:
     """Choose a defender pid to be credited with a block.
 
     shot_kind should match resolve's shot-kind labels (e.g., 'shot_rim', 'shot_post',
@@ -891,6 +899,7 @@ def choose_blocker_pid(rng: random.Random, defense: TeamState, shot_kind: str) -
     Tuning via defense.tactics.context:
       - BLOCK_ASSIGN_POWER (default 1.7)
       - BLOCK_ASSIGN_W_MIN (default 0.05)
+      - BLOCK_ASSIGN_PRIMARY_MULT (default 1.20)
     """
     cand = list(_active(defense))
     if not cand:
@@ -916,6 +925,11 @@ def choose_blocker_pid(rng: random.Random, defense: TeamState, shot_kind: str) -
             poa = _estat(p, 'DEF_POA')
             w = 0.55 * poa + 0.25 * phys + 0.20 * help_
         weights[p.pid] = max(float(w), float(w_min)) ** float(power)
+
+    primary_mult = float(ctx.get('BLOCK_ASSIGN_PRIMARY_MULT', 1.20))
+    primary_mult = max(primary_mult, 0.0)
+    if prefer_pid and prefer_pid in weights:
+        weights[prefer_pid] *= max(primary_mult, 1.0)
 
     if sum(max(w, 0.0) for w in weights.values()) <= 1e-12:
         return rng.choice([p.pid for p in cand])
@@ -995,6 +1009,7 @@ def choose_fouler_pid(
     player_fouls: Dict[str, int],
     foul_out_limit: int,
     outcome: Optional[str] = None,
+    prefer_pid: Optional[str] = None,
 ) -> Optional[str]:
     """Choose a defender pid to be credited with a foul.
 
@@ -1011,6 +1026,7 @@ def choose_fouler_pid(
           FOUL_TROUBLE_FREE (default 2)
           FOUL_TROUBLE_K (default 0.60)
           FOUL_TROUBLE_MIN_MULT (default 0.12)
+          FOUL_ASSIGN_PRIMARY_MULT (default 1.25)
     """
     cands = [pid for pid in (def_on_court or []) if isinstance(pid, str) and pid]
     if not cands:
@@ -1044,6 +1060,11 @@ def choose_fouler_pid(
         trouble_mult = max(float(min_mult), math.exp(-float(k) * float(f_adj)))
 
         weights[pid] = w_base * float(trouble_mult)
+
+    primary_mult = float(ctx.get('FOUL_ASSIGN_PRIMARY_MULT', 1.25))
+    primary_mult = max(primary_mult, 0.0)
+    if prefer_pid and prefer_pid in weights:
+        weights[prefer_pid] *= max(primary_mult, 1.0)
 
     # Fallback: if something degenerated, keep legacy uniform behavior.
     if sum(max(w, 0.0) for w in weights.values()) <= 1e-12:
