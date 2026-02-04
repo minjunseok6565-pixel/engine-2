@@ -1441,7 +1441,7 @@ def resolve_outcome(
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
                 game_state.fatigue[def_team_id][fouler_pid] = 0.0
             clear_pass_tracking(ctx)
-            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False, **matchup_payload, **matchup_dbg}
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
