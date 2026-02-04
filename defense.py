@@ -115,3 +115,32 @@ def team_def_snapshot(team: TeamState) -> Dict[str, float]:
         "PHYSICAL": avg["PHYSICAL"],
         "ENDURANCE": avg["ENDURANCE"],
     }
+
+
+def player_def_snapshot(player: Any) -> Dict[str, float]:
+    """Per-player defensive snapshot for Plan A matchup overlay.
+
+    Keys intentionally match team_def_snapshot() so resolve.py can compute a
+    defense profile dot-product the same way for either team-aggregate defense
+    or a primary-defender (1v1) view.
+    """
+    if player is None:
+        return {
+            "DEF_POA": 50.0,
+            "DEF_RIM": 50.0,
+            "DEF_STEAL": 50.0,
+            "DEF_HELP": 50.0,
+            "DEF_POST": 50.0,
+            "PHYSICAL": 50.0,
+            "ENDURANCE": 50.0,
+        }
+
+    return {
+        "DEF_POA": _safe_stat(player, "DEF_POA"),
+        "DEF_RIM": _safe_stat(player, "DEF_RIM"),
+        "DEF_STEAL": _safe_stat(player, "DEF_STEAL"),
+        "DEF_HELP": _safe_stat(player, "DEF_HELP"),
+        "DEF_POST": _safe_stat(player, "DEF_POST"),
+        "PHYSICAL": _safe_stat(player, "PHYSICAL"),
+        "ENDURANCE": _safe_stat(player, "ENDURANCE"),
+    }
