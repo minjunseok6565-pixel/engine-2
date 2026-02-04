@@ -17,6 +17,7 @@ from .builders import (
 )
 from . import shot_diet
 from . import quality
+from . import matchups
 from .def_role_players import get_or_build_def_role_players, engine_get_stat
 from .core import weighted_choice, clamp
 from .models import GameState, TeamState
@@ -667,6 +668,14 @@ def simulate_possession(
     ctx["shot_diet_style"] = style
     ctx["tactic_name"] = tactic_name
 
+    # Matchups (Plan A): build/cache base 5v5 assignments for this possession segment.
+    # resolve.py also calls ensure_matchups defensively, but doing it here keeps ctx coherent
+    # for any downstream logic that might read matchups.
+    try:
+        matchups.ensure_matchups(ctx, offense, defense, game_state, game_cfg)
+    except Exception as exc:
+        _record_ctx_error("matchups.ensure_matchups", exc)
+
     def _apply_contextual_action_weights(probs: Dict[str, float]) -> Dict[str, float]:
         """Soft-bias action weights by possession context (no per-team fixed style)."""
         if not probs:
@@ -1002,6 +1011,22 @@ def simulate_possession(
                 pri = _normalize_prob_map(pri_term)
         outcome = weighted_choice(rng, pri)
 
+        # Matchup play directive (Plan A): optional hunt / forced actor/defender for this play.
+        # Must run after outcome is selected but before resolve_outcome() so it can set ctx['force_actor_pid'].
+        try:
+            matchups.maybe_prepare_matchup_play_context(
+                rng=rng,
+                offense=offense,
+                defense=defense,
+                action=action,
+                outcome=outcome,
+                tags=tags,
+                ctx=ctx,
+                game_cfg=game_cfg,
+            )
+        except Exception as exc:
+            _record_ctx_error("matchups.maybe_prepare_matchup_play_context", exc)
+
         term, payload = resolve_outcome(
             rng,
             outcome,
@@ -1266,11 +1291,22 @@ def simulate_possession(
                             ctx.pop("def_role_players", None)
                             ctx.pop("def_role_players_detail", None)
 
+                            # invalidate matchup cache (lineup-dependent)
+                            ctx.pop("matchups", None)
+                            ctx.pop("_matchups_sig", None)
+                            ctx.pop("_matchups_rev", None)
+
                             # invalidate + recompute shot diet style immediately (lineup-dependent)
                             ctx.pop("shot_diet_style", None)
                             ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
                                 offense, defense, game_state=game_state, ctx=ctx
                             )
+
+                            # rebuild matchup cache for the updated lineups
+                            try:
+                                matchups.ensure_matchups(ctx, offense, defense, game_state, game_cfg)
+                            except Exception:
+                                pass
 
                             del changed  # not used beyond this point; keep explicit for clarity
                         except Exception as exc:
