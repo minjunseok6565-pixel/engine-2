@@ -1296,6 +1296,10 @@ def simulate_possession(
                             ctx.pop("_matchups_sig", None)
                             ctx.pop("_matchups_rev", None)
 
+                            # clear any active matchup-play directive (lineup-dependent)
+                            ctx.pop("matchup_play", None)
+                            ctx.pop("force_actor_pid", None)
+
                             # invalidate + recompute shot diet style immediately (lineup-dependent)
                             ctx.pop("shot_diet_style", None)
                             ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
