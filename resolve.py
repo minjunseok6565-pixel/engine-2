@@ -437,6 +437,11 @@ def resolve_outcome(
         }
         if matchup_meta:
             payload["matchup_meta"] = matchup_meta
+        try:
+            matchups.consume_matchup_play(ctx, "TURNOVER", outcome)
+        except Exception:
+            pass
+
         return "TURNOVER", payload
 
     def _record_exception(where: str, exc: BaseException) -> None:
@@ -484,6 +489,10 @@ def resolve_outcome(
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
         clear_pass_tracking(ctx)
+        try:
+            matchups.consume_matchup_play(ctx, "RESET", outcome)
+        except Exception:
+            pass
         return "RESET", {
             "outcome": outcome,
             "primary_defender_pid": None,
@@ -536,6 +545,21 @@ def resolve_outcome(
         finally:
             # consume (one-shot) to avoid leaking into subsequent steps
             ctx.pop("force_actor_pid", None)
+
+    # Matchup-play actor override (e.g., ongoing HUNT session).
+    # Unlike force_actor_pid (one-shot), matchup_play can persist across PASS/RESET steps.
+    try:
+        mp = ctx.get("matchup_play")
+        if isinstance(mp, Mapping):
+            mp_actor = mp.get("hunt_actor_pid") or mp.get("forced_actor_pid")
+            if mp_actor is not None:
+                mp_pid = str(mp_actor)
+                if mp_pid and offense.is_on_court(mp_pid):
+                    mp_player = offense.find_player(mp_pid)
+                    if mp_player is not None:
+                        actor = mp_player
+    except Exception as e:
+        _record_exception("matchup_play_actor_override", e)
 
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
@@ -601,6 +625,12 @@ def resolve_outcome(
         if matchup_meta:
             payload.setdefault("matchup_meta", matchup_meta)
         return payload
+
+    def _consume_matchup(term_name: str) -> None:
+        try:
+            matchups.consume_matchup_play(ctx, term_name, outcome)
+        except Exception as e:
+            _record_exception("matchups.consume_matchup_play", e)
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
     fatigue_logit_max = float(ctx.get("fatigue_logit_max", -0.25))
@@ -814,6 +844,7 @@ def resolve_outcome(
                 **shot_dbg,
             }
             _attach_matchup(payload)
+            _consume_matchup("SCORE")
             return "SCORE", payload
         else:
             payload = {
@@ -873,6 +904,7 @@ def resolve_outcome(
                 _record_exception("block_model", e)
 
             _attach_matchup(payload)
+            _consume_matchup("MISS")
             clear_pass_tracking(ctx)
             return "MISS", payload
 
@@ -1038,6 +1070,7 @@ def resolve_outcome(
                 _record_exception("steal_split_bad_pass", e)
 
             _attach_matchup(payload)
+            _consume_matchup("TURNOVER")
             clear_pass_tracking(ctx)
 
             return "TURNOVER", payload
@@ -1129,6 +1162,8 @@ def resolve_outcome(
                         "p_ok": float(p_ok),
                     }
                 )
+            _attach_matchup(payload)
+            _consume_matchup("CONTINUE")
             return "CONTINUE", payload
 
         # PASS failed (but not catastrophic enough to be a bad-pass turnover)
@@ -1137,7 +1172,8 @@ def resolve_outcome(
             payload.update(
                 {"q_score": q_score, "q_detail": q_detail, "carry_in": float(carry_in), "p_ok": float(p_ok)}
             )
-        _attach_matchup(payload)    
+        _attach_matchup(payload)
+        _consume_matchup("RESET")
         clear_pass_tracking(ctx)
         
         return "RESET", payload
@@ -1288,6 +1324,7 @@ def resolve_outcome(
                 _record_exception("steal_split_to", e)
 
         _attach_matchup(payload)
+        _consume_matchup("TURNOVER")
         return "TURNOVER", payload
 
     if is_foul(outcome):
@@ -1339,6 +1376,7 @@ def resolve_outcome(
                 game_state.fatigue[def_team_id][fouler_pid] = 0.0
             payload = {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
             _attach_matchup(payload)
+            _consume_matchup("FOUL_NO_SHOTS")
             clear_pass_tracking(ctx)
             return "FOUL_NO_SHOTS", payload
 
@@ -1537,6 +1575,7 @@ def resolve_outcome(
         if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
         _attach_matchup(payload)
+        _consume_matchup("FOUL_FT")
         clear_pass_tracking(ctx)
         return "FOUL_FT", payload
 
@@ -1544,10 +1583,12 @@ def resolve_outcome(
     if is_reset(outcome):
         payload = {"outcome": outcome}
         _attach_matchup(payload)
+        _consume_matchup("RESET")
         clear_pass_tracking(ctx)
         return "RESET", payload
 
     clear_pass_tracking(ctx)
     payload = {"outcome": outcome}
     _attach_matchup(payload)
+    _consume_matchup("RESET")
     return "RESET", payload
