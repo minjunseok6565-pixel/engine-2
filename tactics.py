@@ -29,6 +29,23 @@ class TacticsConfig:
 
     context: Dict[str, Any] = field(default_factory=dict)
 
+    # -------------------------
+    # Context keys (Plan 1: Matchup MVP)
+    # -------------------------
+    # Defense-side controls:
+    # - MATCHUP_LOCK_MAP: {off_pid: def_pid}  (who to lock onto whom)
+    # - MATCHUP_LOCK_STRENGTH: 0..1           (probability / strength of enforcing lock)
+    # - MATCHUP_HIDE_DEF_PID: str             (defender to "hide" from high-threat attackers)
+    # - MATCHUP_HIDE_STRENGTH: 0..1           (how strongly to avoid the hide defender being picked)
+    # - MATCHUP_HIDE_THREAT_THRESHOLD: 0..100 (threat score threshold to apply hiding)
+    #
+    # Offense-side controls:
+    # - MATCHUP_HUNT_ATTACKER_PID: str        (attacker who initiates hunting)
+    # - MATCHUP_HUNT_TARGET_DEF_PID: str      (weak defender to be hunted)
+    # - MATCHUP_HUNT_FREQ: 0..1               (how often hunting is attempted)
+    #
+    # Optional tuning knobs (logit multipliers, 0..2):
+    # - MATCHUP_LOGIT_MULT_SHOT / PASS / FOUL / STEAL
 
 # -------------------------
 # Defense scheme canonicalization
