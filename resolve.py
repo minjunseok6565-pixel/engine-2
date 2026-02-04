@@ -1542,7 +1542,6 @@ def resolve_outcome(
                 kind=kind,
                 variance_mult=variance_mult,
                 logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(matchup_logit),
-                 fatigue_logit_delta=fatigue_logit_delta,
                 fatigue_logit_delta=fatigue_logit_delta,
                 game_cfg=game_cfg,
             )
