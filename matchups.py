@@ -280,8 +280,11 @@ def maybe_prepare_matchup_play_context(
     This is expected to be called immediately after outcome is sampled but before
     resolve_outcome() is called.
     """
-    # clear previous play directive to avoid leaking
-    ctx.pop("matchup_play", None)
+    # If a matchup directive is already active (e.g., an ongoing HUNT session),
+    # do not overwrite it here. It will be consumed/expired explicitly after resolve.
+    existing = ctx.get("matchup_play")
+    if isinstance(existing, Mapping) and existing:
+        return
 
     # If another system already forced an actor (e.g., ORB putback), do not override.
     if ctx.get("force_actor_pid"):
@@ -346,12 +349,20 @@ def maybe_prepare_matchup_play_context(
     if actor_pid is None:
         actor_pid = choose_default_actor(offense).pid
 
+    # Keep the directive alive across intermediate PASS/RESET outcomes (text sim),
+    # but expire it quickly to avoid leaking across unrelated sequences.
+    try:
+        ttl = int(octx.get("HUNT_TTL", 2))
+    except Exception:
+        ttl = 2
+    ttl = max(1, min(5, ttl))
+
     ctx["matchup_play"] = {
         "hunt_target_def_pid": target_pid,
         "hunt_actor_pid": actor_pid,
         "event_tag_hint": "HUNT",
+        "ttl": ttl,
     }
-    ctx["force_actor_pid"] = actor_pid
 
 
 def pick_primary_defender_for_play(
@@ -372,14 +383,14 @@ def pick_primary_defender_for_play(
       3) ctx['matchups'][actor_pid] (BASE)
       4) fallback: best DEF_POA on the floor (FALLBACK)
 
-    Note: consumes ctx['matchup_play'] (one-shot).
+    Note: does NOT consume ctx['matchup_play']; it is consumed/expired explicitly.
     """
     ensure_matchups(ctx, offense, defense, game_state=None, game_cfg=game_cfg)
 
     base_map = ctx.get("matchups") if isinstance(ctx.get("matchups"), dict) else {}
     base_def = _as_pid(base_map.get(actor_pid))
 
-    play = ctx.pop("matchup_play", None)
+    play = ctx.get("matchup_play", None)
     play_map = play if isinstance(play, Mapping) else {}
 
     forced = _as_pid(play_map.get("forced_primary_def_pid"))
@@ -424,3 +435,43 @@ def matchup_blend_w(game_cfg: Any, outcome: str, base_action: str, matchup_event
         w += float(knobs.get("matchup_w_bonus_manual", 0.06))
 
     return clamp(float(w), 0.0, 0.85)
+
+def consume_matchup_play(ctx: Dict[str, Any], term: str, outcome: str) -> None:
+    """Consume/expire matchup_play directives.
+
+    Terminal events (score/miss/turnover/foul) clear the directive immediately.
+    Non-terminal events (passes/resets/continues) decrement ttl until it reaches 0.
+
+    This explicit lifecycle avoids leaking state across plays and prevents accidental
+    consumption due to call ordering (e.g., when primary defender is queried).
+    """
+    play = ctx.get("matchup_play")
+    if not isinstance(play, Mapping) or not play:
+        return
+
+    term_s = str(term or '')
+    out_s = str(outcome or '')
+
+    # Terminal events: clear immediately
+    if term_s in ("SCORE", "MISS", "TURNOVER") or term_s.startswith("FOUL"):
+        ctx.pop("matchup_play", None)
+        return
+
+    # Non-terminal: decrement TTL on pass-like steps
+    if term_s in ("RESET", "CONTINUE") or out_s.startswith("PASS_"):
+        try:
+            ttl = int(play.get("ttl", 1))
+        except Exception:
+            ttl = 1
+        ttl -= 1
+        if ttl <= 0:
+            ctx.pop("matchup_play", None)
+            return
+        if isinstance(play, dict):
+            play["ttl"] = ttl
+        else:
+            new_play = dict(play)
+            new_play["ttl"] = ttl
+            ctx["matchup_play"] = new_play
+        return
+
