@@ -363,6 +363,81 @@ def sanitize_tactics_config(
                 report.warn(f"{label}.context.{k}: clamped {fv:.3f} -> {fvv:.3f}")
             clean_ctx[k] = fvv
 
+            elif k in ("MATCHUP_HUNT_FREQ", "MATCHUP_HIDE_STRENGTH", "MATCHUP_LOCK_STRENGTH"):
+            # 0..1 scalars
+            if not _is_finite_number(v):
+                msg = f"{label}.context.{k}: non-numeric '{v}'"
+                if cfg.strict:
+                    report.error(msg)
+                    continue
+                default = 1.0 if k == "MATCHUP_LOCK_STRENGTH" else 0.0
+                report.warn(msg + f" (set to {default:.1f})")
+                clean_ctx[k] = default
+                continue
+            fv = float(v)
+            fvv = clamp(fv, 0.0, 1.0)
+            if abs(fvv - fv) > 1e-9:
+                report.warn(f"{label}.context.{k}: clamped {fv:.3f} -> {fvv:.3f}")
+            clean_ctx[k] = fvv
+
+        elif k == "MATCHUP_HIDE_THREAT_THRESHOLD":
+            # 0..100 scalar
+            if not _is_finite_number(v):
+                msg = f"{label}.context.{k}: non-numeric '{v}'"
+                if cfg.strict:
+                    report.error(msg)
+                    continue
+                report.warn(msg + " (set to 60)")
+                clean_ctx[k] = 60.0
+                continue
+            fv = float(v)
+            fvv = clamp(fv, 0.0, 100.0)
+            if abs(fvv - fv) > 1e-9:
+                report.warn(f"{label}.context.{k}: clamped {fv:.3f} -> {fvv:.3f}")
+            clean_ctx[k] = fvv
+
+        elif k in (
+            "MATCHUP_LOGIT_MULT_SHOT",
+            "MATCHUP_LOGIT_MULT_PASS",
+            "MATCHUP_LOGIT_MULT_FOUL",
+            "MATCHUP_LOGIT_MULT_STEAL",
+        ):
+            # 0..2 scalar tuning knobs
+            if not _is_finite_number(v):
+                msg = f"{label}.context.{k}: non-numeric '{v}'"
+                if cfg.strict:
+                    report.error(msg)
+                    continue
+                report.warn(msg + " (set to 0.5)")
+                clean_ctx[k] = 0.5
+                continue
+            fv = float(v)
+            fvv = clamp(fv, 0.0, 2.0)
+            if abs(fvv - fv) > 1e-9:
+                report.warn(f"{label}.context.{k}: clamped {fv:.3f} -> {fvv:.3f}")
+            clean_ctx[k] = fvv
+
+        elif k == "MATCHUP_LOCK_MAP":
+            # Expected: {off_pid: def_pid}
+            if not isinstance(v, Mapping):
+                msg = f"{label}.context.{k}: expected dict, got {type(v).__name__}"
+                if cfg.strict:
+                    report.error(msg)
+                    continue
+                report.warn(msg + " (ignored)")
+                continue
+            mm: Dict[str, str] = {}
+            for kk, vv in v.items():
+                try:
+                    sk = "" if kk is None else str(kk).strip()
+                    sv = "" if vv is None else str(vv).strip()
+                    if sk and sv:
+                        mm[sk] = sv
+                except Exception:
+                    continue
+            clean_ctx[k] = mm
+
+
         else:
             clean_ctx[k] = v
     tac.context = clean_ctx
