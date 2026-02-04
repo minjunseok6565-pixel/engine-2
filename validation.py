@@ -363,7 +363,7 @@ def sanitize_tactics_config(
                 report.warn(f"{label}.context.{k}: clamped {fv:.3f} -> {fvv:.3f}")
             clean_ctx[k] = fvv
 
-            elif k in ("MATCHUP_HUNT_FREQ", "MATCHUP_HIDE_STRENGTH", "MATCHUP_LOCK_STRENGTH"):
+        elif k in ("MATCHUP_HUNT_FREQ", "MATCHUP_HIDE_STRENGTH", "MATCHUP_LOCK_STRENGTH"):
             # 0..1 scalars
             if not _is_finite_number(v):
                 msg = f"{label}.context.{k}: non-numeric '{v}'"
