@@ -96,6 +96,27 @@ def build_offense_action_probs(
         base["DHO"] = base.get("DHO", 0.5) * 1.03
         base["PostUp"] = base.get("PostUp", 0.5) * 1.02
 
+    # --- Matchup (plan1): hunting intent slightly nudges action mix toward on-ball creation ---
+    # NOTE: Small bias only. Main matchup effects come from resolve.py (defender pick + logit deltas).
+    try:
+        tac_ctx = getattr(off_tac, "context", None)
+        tac_ctx = tac_ctx if isinstance(tac_ctx, dict) else {}
+        hunt_freq = float(tac_ctx.get("MATCHUP_HUNT_FREQ", 0.0) or 0.0)
+    except Exception:
+        hunt_freq = 0.0
+    hunt_freq = clamp(hunt_freq, 0.0, 1.0)
+    hunt_target = ""
+    try:
+        hunt_target = str(tac_ctx.get("MATCHUP_HUNT_TARGET_DEF_PID", "") or "").strip()
+    except Exception:
+        hunt_target = ""
+    if hunt_freq > 1e-9 and hunt_target:
+        base["ISO"] = base.get("ISO", 0.5) * (1.0 + 0.10 * hunt_freq)
+        base["PnR"] = base.get("PnR", 0.5) * (1.0 + 0.08 * hunt_freq)
+        base["Drive"] = base.get("Drive", 0.5) * (1.0 + 0.08 * hunt_freq)
+        base["DHO"] = base.get("DHO", 0.5) * (1.0 + 0.05 * hunt_freq)
+        base["ExtraPass"] = base.get("ExtraPass", 0.5) * (1.0 - 0.03 * hunt_freq)
+
     if def_tac is None:
         return normalize_weights(base)
 
@@ -238,6 +259,39 @@ def build_outcome_priors(
         out_mult = shot_diet.get_outcome_multipliers(style, tactic_name, base_action)
         for outcome in list(pri.keys()):
             pri[outcome] = max(pri.get(outcome, 0.0) * out_mult.get(outcome, 1.0), 1e-6)
+
+    # --- Matchup (plan1): hunting intent slightly nudges outcome priors toward self-created looks ---
+    try:
+        tac_ctx = getattr(off_tac, "context", None)
+        tac_ctx = tac_ctx if isinstance(tac_ctx, dict) else {}
+        hunt_freq = float(tac_ctx.get("MATCHUP_HUNT_FREQ", 0.0) or 0.0)
+    except Exception:
+        hunt_freq = 0.0
+    hunt_freq = clamp(hunt_freq, 0.0, 1.0)
+    hunt_target = ""
+    try:
+        hunt_target = str(tac_ctx.get("MATCHUP_HUNT_TARGET_DEF_PID", "") or "").strip()
+    except Exception:
+        hunt_target = ""
+    if hunt_freq > 1e-9 and hunt_target:
+        if base_action in ("ISO", "PnR", "Drive", "DHO"):
+            # Slightly prefer on-ball creation outcomes when hunting a weak defender
+            for k in (
+                "SHOT_3_OD",
+                "SHOT_MID_PU",
+                "SHOT_RIM_LAYUP",
+                "SHOT_RIM_CONTACT",
+                "FOUL_DRAW_RIM",
+                "FOUL_DRAW_JUMPER",
+                "TO_HANDLE_LOSS",
+            ):
+                if k in pri:
+                    pri[k] *= (1.0 + 0.10 * hunt_freq)
+            # Slightly reduce pure catch-and-shoot share (keep small so spacing styles still work)
+            for k in ("SHOT_3_CS", "SHOT_MID_CS"):
+                if k in pri:
+                    pri[k] *= (1.0 - 0.04 * hunt_freq)
+
 
     return normalize_weights(pri)
 
