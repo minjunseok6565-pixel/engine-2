@@ -471,7 +471,19 @@ ERA_TARGETS: Dict[str, Dict[str, Any]] = {
 DEFAULT_ERA: Dict[str, Any] = {
     "name": "builtin_default",
     "version": "1.0",
-    "knobs": {"mult_lo": 0.70, "mult_hi": 1.40},
+    "knobs": {
+        "mult_lo": 0.70,
+        "mult_hi": 1.40,
+
+        # Matchup overlay (Plan A)
+        "matchup_w_shot": 0.48,
+        "matchup_w_pass": 0.22,
+        "matchup_w_to": 0.28,
+        "matchup_w_foul": 0.30,
+        "matchup_w_misc": 0.20,
+        "matchup_w_bonus_hunt": 0.10,
+        "matchup_w_bonus_manual": 0.06,
+    },
     "prob_model": dict(DEFAULT_PROB_MODEL),
 
     "logistic_params": copy.deepcopy(DEFAULT_LOGISTIC_PARAMS),
