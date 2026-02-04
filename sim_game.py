@@ -867,7 +867,37 @@ def simulate_game(
                 "_pos_had_orb": pos_had_orb,
                 "_pos_origin_start": pos_origin_start,
                 "first_fga_shotclock_sec": pos_first_fga_sc,
+
+                # --- Matchups (Plan-1 MVP) ---
+                # Version increments when sim_possession rebuilds matchups for a new segment/lineup.
+                "matchups_version": 0,
+                # Defender-vs-team blending weights for defense keys (0..1 = primary defender weight).
+                "matchup_def_blend": {
+                    "DEF_POA": 0.85,
+                    "DEF_STEAL": 0.75,
+                    "DEF_POST": 0.80,
+                    "DEF_RIM": 0.25,
+                    "DEF_HELP": 0.30,
+                    "PHYSICAL": 0.50,
+                    "ENDURANCE": 0.50,
+                },
+                # If true, sim_possession may emit MATCHUP_SET / MATCHUP_EVENT debug replay entries.
+                "debug_matchups": bool(rules.get("debug_matchups", False)),
             }
+
+            # Optional override from defense tactics context (JSON-friendly dict of {DEF_KEY: weight}).
+            try:
+                dctx = getattr(getattr(defense, "tactics", None), "context", None)
+                blend_override = dctx.get("MATCHUP_DEF_BLEND") if isinstance(dctx, dict) else None
+                if isinstance(blend_override, dict):
+                    for k, v in blend_override.items():
+                        kk = str(k)
+                        try:
+                            ctx["matchup_def_blend"][kk] = clamp(float(v), 0.0, 1.0)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
 
             # --- Possession time segmentation (supports in-possession forced subs) ---
             # NOTE: sim_possession shallow-copies ctx (ctx = dict(ctx)), so these must be MUTABLE
