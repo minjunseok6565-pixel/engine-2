@@ -567,6 +567,9 @@ def simulate_possession(
     if not is_continuation:
         offense.possessions += 1
         before_pts = int(offense.pts)
+        # Matchup/play directives should not leak across possessions.
+        ctx.pop("matchup_play", None)
+        ctx.pop("force_actor_pid", None)
     else:
         before_pts = int(ctx.get("_pos_before_pts", int(offense.pts)))
 
