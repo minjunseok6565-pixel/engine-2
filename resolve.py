@@ -530,6 +530,21 @@ def resolve_outcome(
     else:
         actor = _pick_default_actor(offense)
 
+    # Matchup-play actor override (e.g., ongoing HUNT session).
+    # Unlike force_actor_pid (one-shot), matchup_play can persist across PASS/RESET steps.
+    try:
+        mp = ctx.get("matchup_play")
+        if isinstance(mp, Mapping):
+            mp_actor = mp.get("hunt_actor_pid") or mp.get("forced_actor_pid")
+            if mp_actor is not None:
+                mp_pid = str(mp_actor)
+                if mp_pid and offense.is_on_court(mp_pid):
+                    mp_player = offense.find_player(mp_pid)
+                    if mp_player is not None:
+                        actor = mp_player
+    except Exception as e:
+        _record_exception("matchup_play_actor_override", e)
+
     # Optional forced actor (e.g., ORB -> immediate Putback):
     # If provided, override the chosen shooter/foul-draw/turnover actor once and then consume.
     force_pid = ctx.get("force_actor_pid")
@@ -545,21 +560,6 @@ def resolve_outcome(
         finally:
             # consume (one-shot) to avoid leaking into subsequent steps
             ctx.pop("force_actor_pid", None)
-
-    # Matchup-play actor override (e.g., ongoing HUNT session).
-    # Unlike force_actor_pid (one-shot), matchup_play can persist across PASS/RESET steps.
-    try:
-        mp = ctx.get("matchup_play")
-        if isinstance(mp, Mapping):
-            mp_actor = mp.get("hunt_actor_pid") or mp.get("forced_actor_pid")
-            if mp_actor is not None:
-                mp_pid = str(mp_actor)
-                if mp_pid and offense.is_on_court(mp_pid):
-                    mp_player = offense.find_player(mp_pid)
-                    if mp_player is not None:
-                        actor = mp_player
-    except Exception as e:
-        _record_exception("matchup_play_actor_override", e)
 
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
@@ -1097,6 +1097,7 @@ def resolve_outcome(
                     }
                 )
             _attach_matchup(payload)
+            _consume_matchup("RESET")
             clear_pass_tracking(ctx)
             return "RESET", payload
 
