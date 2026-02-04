@@ -17,6 +17,7 @@ from .builders import (
 )
 from . import shot_diet
 from . import quality
+from . import matchups
 from .def_role_players import get_or_build_def_role_players, engine_get_stat
 from .core import weighted_choice, clamp
 from .models import GameState, TeamState
@@ -667,6 +668,127 @@ def simulate_possession(
     ctx["shot_diet_style"] = style
     ctx["tactic_name"] = tactic_name
 
+    # --- Matchups (Plan-1 MVP) ---
+    # Build and maintain a 5v5 OFF_PID -> DEF_PID matchup map for the current on-court units.
+    # This mapping is used by resolve.py to pick a primary defender and blend defensive values.
+    def _ensure_matchups(reason: str = "pos_start") -> None:
+        try:
+            new_off = list(getattr(offense, "on_court_pids", []) or [])
+
+            new_def = list(getattr(defense, "on_court_pids", []) or [])
+
+            # Normalize to 5-man units if needed.
+            if len(new_off) != 5:
+                new_off = [p.pid for p in offense.on_court_players()]
+            if len(new_def) != 5:
+                new_def = [p.pid for p in defense.on_court_players()]
+
+            snap_off = sorted([str(x) for x in new_off if str(x)])
+            snap_def = sorted([str(x) for x in new_def if str(x)])
+
+            # No-op if lineup snapshot is unchanged.
+            if isinstance(ctx.get("matchups_map"), dict):
+                if ctx.get("matchups_off_on_court") == snap_off and ctx.get("matchups_def_on_court") == snap_def:
+                    return
+
+            m_map, m_rev, m_meta = matchups.build_matchups(offense, defense, ctx, rng=rng)
+
+            ctx["matchups_version"] = int(ctx.get("matchups_version", 0) or 0) + 1
+            ctx["matchups_off_on_court"] = snap_off
+            ctx["matchups_def_on_court"] = snap_def
+            ctx["matchups_map"] = m_map
+            ctx["matchups_rev"] = m_rev
+            ctx["matchups_meta"] = m_meta
+
+            if bool(ctx.get("debug_matchups", False)):
+                try:
+                    pairs = [
+                        {"off_pid": str(op), "def_pid": str(m_map.get(op, "") or "")}
+                        for op in new_off
+                    ]
+                    emit_event(
+                        game_state,
+                        event_type="MATCHUP_SET",
+                        home=home_team,
+                        away=away_team,
+                        rules=rules,
+                        team_id=off_team_id,
+                        opp_team_id=def_team_id,
+                        pos_start=str(pos_origin),
+                        matchups_version=int(ctx.get("matchups_version", 0) or 0),
+                        pairs=pairs,
+                        meta=dict(m_meta) if isinstance(m_meta, dict) else {},
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            _record_ctx_error("matchups.ensure", exc)
+
+    def _maybe_inject_matchup_force() -> None:
+        """Optionally inject a one-shot forced matchup for this possession step.
+
+        Input shape (offense.tactics.context):
+            MATCHUP_FORCE: {off_pid, def_pid, event?, reason?, force_actor?}
+        Output (ctx):
+            matchup_force: {off_pid, def_pid, event, reason, ttl=1}
+        """
+        if ctx.get("_matchup_force_injected"):
+            return
+        try:
+            tctx = getattr(getattr(offense, "tactics", None), "context", None)
+            raw = tctx.get("MATCHUP_FORCE") if isinstance(tctx, dict) else None
+            if not isinstance(raw, dict):
+                return
+
+            opid = str(raw.get("off_pid") or "").strip()
+            dpid = str(raw.get("def_pid") or "").strip()
+            if not opid or not dpid:
+                return
+            if not offense.is_on_court(opid) or not defense.is_on_court(dpid):
+                return
+
+            ev = str(raw.get("event") or "USER_FORCE").strip() or "USER_FORCE"
+            reason = raw.get("reason")
+            force_actor = bool(raw.get("force_actor", False))
+
+            ctx["matchup_force"] = {
+                "off_pid": opid,
+                "def_pid": dpid,
+                "event": ev,
+                "reason": (str(reason) if reason is not None else None),
+                "ttl": 1,
+            }
+            if force_actor:
+                ctx["force_actor_pid"] = opid
+
+            ctx["_matchup_force_injected"] = True
+
+            if bool(ctx.get("debug_matchups", False)):
+                try:
+                    emit_event(
+                        game_state,
+                        event_type="MATCHUP_EVENT",
+                        home=home_team,
+                        away=away_team,
+                        rules=rules,
+                        team_id=off_team_id,
+                        opp_team_id=def_team_id,
+                        pos_start=str(pos_origin),
+                        matchups_version=int(ctx.get("matchups_version", 0) or 0),
+                        event=ev,
+                        off_pid=opid,
+                        def_pid=dpid,
+                        reason=(str(reason) if reason is not None else None),
+                        ttl=1,
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:
+            _record_ctx_error("matchups.force_inject", exc)
+
+    # Build initial matchup map for this possession/segment.
+    _ensure_matchups(reason="pos_start")
+
     def _apply_contextual_action_weights(probs: Dict[str, float]) -> Dict[str, float]:
         """Soft-bias action weights by possession context (no per-team fixed style)."""
         if not probs:
@@ -1002,6 +1124,9 @@ def simulate_possession(
                 pri = _normalize_prob_map(pri_term)
         outcome = weighted_choice(rng, pri)
 
+        _ensure_matchups(reason="pre_resolve")
+        _maybe_inject_matchup_force()
+
         term, payload = resolve_outcome(
             rng,
             outcome,
@@ -1271,6 +1396,9 @@ def simulate_possession(
                             ctx["shot_diet_style"] = shot_diet.compute_shot_diet_style(
                                 offense, defense, game_state=game_state, ctx=ctx
                             )
+
+                            # Rebuild matchup map (lineup-dependent).
+                            _ensure_matchups(reason="forced_sub")
 
                             del changed  # not used beyond this point; keep explicit for clarity
                         except Exception as exc:
