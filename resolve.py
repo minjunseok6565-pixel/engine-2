@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .builders import get_action_base
 from .core import clamp, dot_profile, sigmoid
-from .defense import team_def_snapshot
+from .defense import team_def_snapshot, player_def_snapshot
 from .era import DEFAULT_PROB_MODEL
 from .participants import (
     choose_assister_weighted,
@@ -41,6 +41,7 @@ def _pick_default_actor(offense: TeamState) -> Player:
     return choose_default_actor(offense)
 
 from . import quality
+from . import matchups
 from .def_role_players import get_or_build_def_role_players, engine_get_stat
 
 def _knob_mult(game_cfg: "GameConfig", key: str, default: float = 1.0) -> float:
@@ -405,7 +406,38 @@ def resolve_outcome(
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
+        primary_def_pid = None
+        matchup_event = "NONE"
+        matchup_meta: Dict[str, Any] = {}
+        try:
+            base_action_sc = get_action_base(action, game_cfg)
+            matchups.ensure_matchups(ctx, offense, defense, game_state, game_cfg)
+            primary_def_pid, matchup_event, matchup_meta = matchups.pick_primary_defender_for_play(
+                rng,
+                actor.pid,
+                outcome,
+                base_action_sc,
+                offense,
+                defense,
+                ctx,
+                game_cfg,
+            )
+        except Exception:
+            # never allow early turnover path to crash the sim
+            pass
+        payload: Dict[str, Any] = {
+            "outcome": outcome,
+            "pid": actor.pid,
+            "primary_defender_pid": primary_def_pid,
+            "matchup_event": matchup_event,
+            "matchup_w": 0.0,
+            "team_def_score": None,
+            "matchup_def_score": None,
+            "matchup_adv": None,
+        }
+        if matchup_meta:
+            payload["matchup_meta"] = matchup_meta
+        return "TURNOVER", payload
 
     def _record_exception(where: str, exc: BaseException) -> None:
         """Record exceptions into ctx for debugging without breaking sim flow."""
@@ -448,11 +480,19 @@ def resolve_outcome(
     style = ctx.get("shot_diet_style")
 
     base_action = get_action_base(action, game_cfg)
-    def_snap = team_def_snapshot(defense)
+    team_def_snap = team_def_snapshot(defense)
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
         clear_pass_tracking(ctx)
-        return "RESET", {"outcome": outcome}
+        return "RESET", {
+            "outcome": outcome,
+            "primary_defender_pid": None,
+            "matchup_event": "NONE",
+            "matchup_w": 0.0,
+            "team_def_score": None,
+            "matchup_def_score": None,
+            "matchup_adv": None,
+        }
 
     # choose participants
     if is_shot(outcome):
@@ -502,8 +542,65 @@ def resolve_outcome(
     # compute scores
     off_vals = {k: actor.get(k) for k in prof["offense"].keys()}
     off_score = dot_profile(off_vals, prof["offense"])
-    def_vals = {k: float(def_snap.get(k, 50.0)) for k in prof["defense"].keys()}
-    def_score = dot_profile(def_vals, prof["defense"])
+
+    # Matchup overlay (Plan A): pick a primary defender for this play and blend team-defense
+    # with 1v1 defender snapshot.
+    primary_def_pid: Optional[str] = None
+    matchup_event: str = "NONE"
+    matchup_meta: Dict[str, Any] = {}
+    try:
+        matchups.ensure_matchups(ctx, offense, defense, game_state, game_cfg)
+        primary_def_pid, matchup_event, matchup_meta = matchups.pick_primary_defender_for_play(
+            rng,
+            actor.pid,
+            outcome,
+            base_action,
+            offense,
+            defense,
+            ctx,
+            game_cfg,
+        )
+    except Exception as e:
+        _record_exception("matchups.pick_primary_defender_for_play", e)
+
+    team_def_vals = {k: float(team_def_snap.get(k, 50.0)) for k in prof["defense"].keys()}
+    team_def_score = dot_profile(team_def_vals, prof["defense"])
+
+    primary_def_player: Optional[Player] = None
+    if primary_def_pid:
+        try:
+            primary_def_player = defense.find_player(primary_def_pid)
+        except Exception as e:
+            _record_exception("matchups.primary_def_find_player", e)
+            primary_def_player = None
+
+    one_v_one_snap = player_def_snapshot(primary_def_player) if primary_def_player is not None else team_def_snap
+    matchup_def_vals = {k: float(one_v_one_snap.get(k, 50.0)) for k in prof["defense"].keys()}
+    matchup_def_score = dot_profile(matchup_def_vals, prof["defense"])
+
+    try:
+        matchup_w = float(matchups.matchup_blend_w(game_cfg, outcome, base_action, matchup_event))
+    except Exception as e:
+        _record_exception("matchups.matchup_blend_w", e)
+        matchup_w = 0.0
+    matchup_w = float(clamp(matchup_w, 0.0, 0.85))
+
+    def_score = (1.0 - matchup_w) * float(team_def_score) + matchup_w * float(matchup_def_score)
+    def_score_blended_raw = float(def_score)
+
+    def _attach_matchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach matchup overlay metadata for UI/replay."""
+        if not isinstance(payload, dict):
+            return payload
+        payload.setdefault("primary_defender_pid", primary_def_pid)
+        payload.setdefault("matchup_event", matchup_event)
+        payload.setdefault("matchup_w", float(matchup_w))
+        payload.setdefault("team_def_score", float(team_def_score))
+        payload.setdefault("matchup_def_score", float(matchup_def_score))
+        payload.setdefault("matchup_adv", float(off_score - def_score_blended_raw))
+        if matchup_meta:
+            payload.setdefault("matchup_meta", matchup_meta)
+        return payload
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
     fatigue_logit_max = float(ctx.get("fatigue_logit_max", -0.25))
@@ -707,7 +804,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "SCORE", {
+            payload = {
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -716,6 +813,8 @@ def resolve_outcome(
                 "assister_pid": assister_pid,
                 **shot_dbg,
             }
+            _attach_matchup(payload)
+            return "SCORE", payload
         else:
             payload = {
                 "outcome": outcome,
@@ -762,7 +861,7 @@ def resolve_outcome(
                 )
 
                 if rng.random() < p_block:
-                    blocker_pid = choose_blocker_pid(rng, defense, kind)
+                    blocker_pid = choose_blocker_pid(rng, defense, kind, prefer_pid=primary_def_pid)
                     if blocker_pid:
                         defense.add_player_stat(blocker_pid, "BLK", 1)
                     payload.update({"blocked": True, "blocker_pid": blocker_pid, "block_kind": kind})
@@ -772,7 +871,8 @@ def resolve_outcome(
                     payload["block_logit_delta"] = float(block_logit_delta)
             except Exception as e:
                 _record_exception("block_model", e)
-                
+
+            _attach_matchup(payload)
             clear_pass_tracking(ctx)
             return "MISS", payload
 
@@ -922,7 +1022,7 @@ def resolve_outcome(
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = choose_stealer_pid(rng, defense, prefer_pid=primary_def_pid)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -937,6 +1037,7 @@ def resolve_outcome(
             except Exception as e:
                 _record_exception("steal_split_bad_pass", e)
 
+            _attach_matchup(payload)
             clear_pass_tracking(ctx)
 
             return "TURNOVER", payload
@@ -962,8 +1063,8 @@ def resolve_outcome(
                         "carry_in": float(carry_in),
                     }
                 )
+            _attach_matchup(payload)
             clear_pass_tracking(ctx)
-                
             return "RESET", payload
 
         # For normal quality passes: sample completion. On success, store carry bucket.
@@ -1036,6 +1137,7 @@ def resolve_outcome(
             payload.update(
                 {"q_score": q_score, "q_detail": q_detail, "carry_in": float(carry_in), "p_ok": float(p_ok)}
             )
+        _attach_matchup(payload)    
         clear_pass_tracking(ctx)
         
         return "RESET", payload
@@ -1159,7 +1261,7 @@ def resolve_outcome(
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = choose_stealer_pid(rng, defense, prefer_pid=primary_def_pid)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -1185,6 +1287,7 @@ def resolve_outcome(
             except Exception as e:
                 _record_exception("steal_split_to", e)
 
+        _attach_matchup(payload)
         return "TURNOVER", payload
 
     if is_foul(outcome):
@@ -1213,7 +1316,15 @@ def resolve_outcome(
 
         # assign a random fouler from on-court defenders (MVP)
         if def_on_court:
-            fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
+            fouler_pid = choose_fouler_pid(
+                rng,
+                defense,
+                list(def_on_court),
+                pf,
+                foul_out_limit,
+                outcome,
+                prefer_pid=primary_def_pid,
+            )
             if fouler_pid:
                 pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
 
@@ -1226,8 +1337,10 @@ def resolve_outcome(
         if outcome == "FOUL_REACH_TRAP" and not in_bonus:
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
                 game_state.fatigue[def_team_id][fouler_pid] = 0.0
+            payload = {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+            _attach_matchup(payload)
             clear_pass_tracking(ctx)
-            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+            return "FOUL_NO_SHOTS", payload
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
@@ -1423,13 +1536,18 @@ def resolve_outcome(
             payload.update(ft_res)
         if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
+        _attach_matchup(payload)
         clear_pass_tracking(ctx)
         return "FOUL_FT", payload
 
 
     if is_reset(outcome):
+        payload = {"outcome": outcome}
+        _attach_matchup(payload)
         clear_pass_tracking(ctx)
-        return "RESET", {"outcome": outcome}
+        return "RESET", payload
 
     clear_pass_tracking(ctx)
-    return "RESET", {"outcome": outcome}
+    payload = {"outcome": outcome}
+    _attach_matchup(payload)
+    return "RESET", payload
