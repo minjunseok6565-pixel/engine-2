@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 from .builders import get_action_base
 from .core import clamp, dot_profile, sigmoid
 from .defense import team_def_snapshot
+from . import matchup
 from .era import DEFAULT_PROB_MODEL
 from .participants import (
     choose_assister_weighted,
@@ -481,6 +482,8 @@ def resolve_outcome(
     else:
         actor = _pick_default_actor(offense)
 
+    forced_actor_used = False
+
     # Optional forced actor (e.g., ORB -> immediate Putback):
     # If provided, override the chosen shooter/foul-draw/turnover actor once and then consume.
     force_pid = ctx.get("force_actor_pid")
@@ -491,11 +494,44 @@ def resolve_outcome(
                 fp_player = offense.find_player(fp)
                 if fp_player is not None:
                     actor = fp_player
+                    forced_actor_used = True
         except Exception as e:
             _record_exception("force_actor_pid", e)
         finally:
             # consume (one-shot) to avoid leaking into subsequent steps
             ctx.pop("force_actor_pid", None)
+
+    # Matchup (plan1): optionally force the hunting attacker as the actor on creation outcomes.
+    # This boosts "mismatch hunting" feel in text sim without a full 5v5 matchup state machine.
+    if not forced_actor_used:
+        try:
+            off_ctx = getattr(getattr(offense, "tactics", None), "context", None)
+            off_ctx = off_ctx if isinstance(off_ctx, dict) else {}
+            hunt_freq = float(off_ctx.get("MATCHUP_HUNT_FREQ", 0.0) or 0.0)
+            hunt_freq = clamp(hunt_freq, 0.0, 1.0)
+            hunt_attacker = str(off_ctx.get("MATCHUP_HUNT_ATTACKER_PID", "") or "").strip()
+            hunt_target_def = str(off_ctx.get("MATCHUP_HUNT_TARGET_DEF_PID", "") or "").strip()
+
+            hunt_ok = outcome in (
+                "SHOT_3_OD",
+                "SHOT_MID_PU",
+                "SHOT_RIM_LAYUP",
+                "SHOT_RIM_CONTACT",
+                "SHOT_RIM_DUNK",
+                "SHOT_TOUCH_FLOATER",
+                "TO_HANDLE_LOSS",
+                "FOUL_DRAW_RIM",
+                "FOUL_DRAW_JUMPER",
+                "FOUL_DRAW_POST",
+            )
+
+            if hunt_ok and hunt_target_def and hunt_attacker and hunt_freq > 1e-9 and offense.is_on_court(hunt_attacker):
+                if rng.random() < hunt_freq:
+                    hp = offense.find_player(hunt_attacker)
+                    if hp is not None:
+                        actor = hp
+        except Exception as e:
+            _record_exception("matchup_hunt_actor_override", e)
 
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
@@ -504,6 +540,58 @@ def resolve_outcome(
     off_score = dot_profile(off_vals, prof["offense"])
     def_vals = {k: float(def_snap.get(k, 50.0)) for k in prof["defense"].keys()}
     def_score = dot_profile(def_vals, prof["defense"])
+
+    # --- Matchup (plan1): pick on-ball defender and prepare payload ---
+    match_pick = None
+    defender = None
+    matchup_payload: Dict[str, Any] = {}
+    matchup_dbg: Dict[str, Any] = {}
+    try:
+        # Determine defender-pick kind from the sampled outcome.
+        if is_shot(outcome):
+            kind_for_pick = _shot_kind_from_outcome(outcome)
+        elif is_pass(outcome):
+            kind_for_pick = "pass"
+        elif is_to(outcome):
+            kind_for_pick = "pass" if outcome == "TO_BAD_PASS" else "turnover"
+        elif is_foul(outcome):
+            if outcome == "FOUL_DRAW_POST":
+                kind_for_pick = "shot_post"
+            elif outcome == "FOUL_DRAW_JUMPER":
+                kind_for_pick = "shot_mid"
+            elif outcome == "FOUL_DRAW_RIM":
+                kind_for_pick = "shot_rim"
+            elif outcome == "FOUL_REACH_TRAP":
+                kind_for_pick = "pass"
+            else:
+                kind_for_pick = "turnover"
+        else:
+            kind_for_pick = "turnover"
+
+        match_pick = matchup.pick_onball_defender(
+            rng,
+            offense,
+            defense,
+            actor_pid=actor.pid,
+            kind=str(kind_for_pick),
+            ctx=ctx,
+        )
+        defender_pid = match_pick.defender_pid
+        if defender_pid:
+            defender = defense.find_player(defender_pid)
+
+        matchup_payload = {
+            "defender_pid": defender_pid,
+            "matchup_event": str(match_pick.event),
+        }
+        if bool(ctx.get("debug_quality", False)):
+            matchup_dbg = {"matchup_detail": dict(match_pick.detail or {})}
+    except Exception as e:
+        _record_exception("matchup_pick", e)
+        match_pick = None
+        defender = None
+        matchup_payload = {}
+        matchup_dbg = {}
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
     fatigue_logit_max = float(ctx.get("fatigue_logit_max", -0.25))
@@ -598,6 +686,30 @@ def resolve_outcome(
         if debug_q:
             shot_dbg["putback_pen"] = float(putback_pen)
 
+        # Matchup (plan1): on-ball defender delta -> logit adjustment (shot make)
+        matchup_logit = 0.0
+        try:
+            if defender is not None and match_pick is not None:
+                delta_score = matchup.def_score_delta_from_defender(
+                    def_profile=prof["defense"],
+                    def_snap=def_snap,
+                    defender=defender,
+                    kind=kind,
+                )
+                mult = matchup.kind_mult_from_ctx(kind, offense, defense)
+                matchup_logit = matchup.delta_to_logit(
+                    game_cfg=game_cfg,
+                    kind=kind,
+                    delta_score=delta_score,
+                    sign=-1.0,
+                    mult=mult,
+                )
+                if debug_q:
+                    shot_dbg["matchup_delta_score"] = float(delta_score)
+                    shot_dbg["matchup_logit_delta"] = float(matchup_logit)
+        except Exception as e:
+            _record_exception("matchup_logit_shot", e)
+
         p_make = prob_from_scores(
             rng,
             base_p,
@@ -605,7 +717,7 @@ def resolve_outcome(
             def_score,
             kind=kind,
             variance_mult=variance_mult,
-            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(putback_pen),
+            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(putback_pen) + float(matchup_logit),
             fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
@@ -714,6 +826,8 @@ def resolve_outcome(
                 "shot_zone_detail": zone_detail,
                 "assisted": assisted,
                 "assister_pid": assister_pid,
+                **matchup_payload,
+                **matchup_dbg,
                 **shot_dbg,
             }
         else:
@@ -724,6 +838,8 @@ def resolve_outcome(
                 "shot_zone_detail": zone_detail,
                 "assisted": False,
                 "assister_pid": None,
+                **matchup_payload,
+                **matchup_dbg,
                 **shot_dbg,
             }
 
@@ -781,6 +897,29 @@ def resolve_outcome(
         pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
         base_s = pass_base.get(outcome, 0.90) * _knob_mult(game_cfg, "pass_base_success_mult", 1.0)
 
+        # Matchup (plan1): on-ball defender delta -> logit adjustment (pass completion)
+        matchup_pass_logit = 0.0
+        matchup_pass_delta_score = None
+        try:
+            if defender is not None and match_pick is not None:
+                delta_score = matchup.def_score_delta_from_defender(
+                    def_profile=prof["defense"],
+                    def_snap=def_snap,
+                    defender=defender,
+                    kind="pass",
+                )
+                matchup_pass_delta_score = float(delta_score)
+                mult = matchup.kind_mult_from_ctx("pass", offense, defense)
+                matchup_pass_logit = matchup.delta_to_logit(
+                    game_cfg=game_cfg,
+                    kind="pass",
+                    delta_score=delta_score,
+                    sign=-1.0,
+                    mult=mult,
+                )
+        except Exception as e:
+            _record_exception("matchup_logit_pass", e)
+
         # PASS completion (offense vs defense) - this preserves passer skill influence.
         p_ok = prob_from_scores(
             rng,
@@ -789,7 +928,7 @@ def resolve_outcome(
             def_score,
             kind="pass",
             variance_mult=variance_mult,
-            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in),
+            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(matchup_pass_logit),
             fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
@@ -873,7 +1012,7 @@ def resolve_outcome(
             offense.outcome_counts["TO_BAD_PASS"] = offense.outcome_counts.get("TO_BAD_PASS", 0) + 1
             offense.tov += 1
             offense.add_player_stat(actor.pid, "TOV", 1)
-            payload = {"outcome": "TO_BAD_PASS", "pid": actor.pid, "type": "PASS_QUALITY_TO"}
+            payload = {"outcome": "TO_BAD_PASS", "pid": actor.pid, "type": "PASS_QUALITY_TO", **matchup_payload, **matchup_dbg}
             if debug_q:
                 payload.update(
                     {
@@ -888,6 +1027,8 @@ def resolve_outcome(
                         "probs": {"p_to_raw": float(p_to_raw), "p_to": float(p_to)},
                         "slopes": {"to": float(s_to), "reset": float(s_reset), "carry": float(s_carry)},
                         "carry_in": float(carry_in),
+                        "matchup_pass_delta_score": float(matchup_pass_delta_score) if matchup_pass_delta_score is not None else None,
+                        "matchup_pass_logit_delta": float(matchup_pass_logit),
                     }
                 )
             # STEAL / LINEOUT split for TO_BAD_PASS:
@@ -909,6 +1050,27 @@ def resolve_outcome(
                 d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
                 steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
 
+                matchup_steal_logit = 0.0
+                try:
+                    if defender is not None and match_pick is not None:
+                        delta_score = matchup.def_score_delta_from_defender(
+                            def_profile=prof["defense"],
+                            def_snap=def_snap,
+                            defender=defender,
+                            kind="turnover",
+                        )
+                        mult_m = matchup.kind_mult_from_ctx("steal", offense, defense)
+                        matchup_steal_logit = matchup.delta_to_logit(
+                            game_cfg=game_cfg,
+                            kind="steal",
+                            delta_score=delta_score,
+                            sign=+1.0,
+                            mult=mult_m,
+                        )
+                except Exception as e:
+                    _record_exception("matchup_logit_steal_bad_pass", e)
+                    matchup_steal_logit = 0.0
+                
                 steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
                 p_steal = prob_from_scores(
                     rng,
@@ -917,12 +1079,19 @@ def resolve_outcome(
                     off_score,
                     kind="steal",
                     variance_mult=steal_var,
-                    logit_delta=float(steal_logit_delta),
+                    logit_delta=float(steal_logit_delta) + float(matchup_steal_logit),
                     game_cfg=game_cfg,
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = None
+                    try:
+                        if defender is not None and defender.pid and defense.is_on_court(defender.pid) and rng.random() < 0.35:
+                            stealer_pid = defender.pid
+                    except Exception:
+                        stealer_pid = None
+                    if not stealer_pid:
+                        stealer_pid = choose_stealer_pid(rng, defense)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -933,7 +1102,7 @@ def resolve_outcome(
                         payload.update({"deadball_override": True, "tov_deadball_reason": "LINEOUT_BAD_PASS"})
 
                 if debug_q:
-                    payload.setdefault("probs", {}).update({"p_steal": float(p_steal), "p_lineout": float(p_lineout)})
+                    payload.setdefault("probs", {}).update({"p_steal": float(p_steal), "p_lineout": float(p_lineout), "matchup_steal_logit_delta": float(matchup_steal_logit)})
             except Exception as e:
                 _record_exception("steal_split_bad_pass", e)
 
@@ -945,7 +1114,7 @@ def resolve_outcome(
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
         p_reset = float(sigmoid(s_reset * (t_reset - q_score)))
         if rng.random() < p_reset:
-            payload = {"outcome": outcome, "type": "PASS_QUALITY_RESET"}
+            payload = {"outcome": outcome, "type": "PASS_QUALITY_RESET", **matchup_payload, **matchup_dbg}
             if debug_q:
                 payload.update(
                     {
@@ -1003,7 +1172,7 @@ def resolve_outcome(
                 ctx["carry_logit_delta"] = float(quality.apply_pass_carry(prev + carry_out, next_outcome="*"))
                 
             ctx["_pending_pass_event"] = {"pid": actor.pid, "outcome": outcome, "base_action": base_action}
-            payload = {"outcome": outcome, "pass_chain": pass_chain + 1}
+            payload = {"outcome": outcome, "pass_chain": pass_chain + 1, **matchup_payload, **matchup_dbg}
             if debug_q:
                 payload.update(
                     {
@@ -1026,15 +1195,17 @@ def resolve_outcome(
                         },
                         "slopes": {"to": float(s_to), "reset": float(s_reset), "carry": float(s_carry)},
                         "p_ok": float(p_ok),
+                        "matchup_pass_delta_score": float(matchup_pass_delta_score) if matchup_pass_delta_score is not None else None,
+                        "matchup_pass_logit_delta": float(matchup_pass_logit),
                     }
                 )
             return "CONTINUE", payload
 
         # PASS failed (but not catastrophic enough to be a bad-pass turnover)
-        payload = {"outcome": outcome, "type": "PASS_FAIL"}
+        payload = {"outcome": outcome, "type": "PASS_FAIL", **matchup_payload, **matchup_dbg}
         if debug_q:
             payload.update(
-                {"q_score": q_score, "q_detail": q_detail, "carry_in": float(carry_in), "p_ok": float(p_ok)}
+                {"q_score": q_score, "q_detail": q_detail, "carry_in": float(carry_in), "p_ok": float(p_ok), "matchup_pass_delta_score": float(matchup_pass_delta_score) if matchup_pass_delta_score is not None else None, "matchup_pass_logit_delta": float(matchup_pass_logit)}
             )
         clear_pass_tracking(ctx)
         
@@ -1046,6 +1217,8 @@ def resolve_outcome(
         offense.add_player_stat(actor.pid, "TOV", 1)
         
         payload: Dict[str, Any] = {"outcome": outcome, "pid": actor.pid}
+        payload.update(matchup_payload)
+        payload.update(matchup_dbg)
 
         if outcome == "TO_CHARGE":
             # Offensive foul (charge): count as a turnover AND an offensive personal/team foul.
@@ -1146,6 +1319,27 @@ def resolve_outcome(
                     steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00
                     p_lineout = clamp(0.06 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
 
+                matchup_steal_logit = 0.0
+                try:
+                    if defender is not None and match_pick is not None:
+                        delta_score = matchup.def_score_delta_from_defender(
+                            def_profile=prof["defense"],
+                            def_snap=def_snap,
+                            defender=defender,
+                            kind="turnover",
+                        )
+                        mult_m = matchup.kind_mult_from_ctx("steal", offense, defense)
+                        matchup_steal_logit = matchup.delta_to_logit(
+                            game_cfg=game_cfg,
+                            kind="steal",
+                            delta_score=delta_score,
+                            sign=+1.0,
+                            mult=mult_m,
+                        )
+                except Exception as e:
+                    _record_exception("matchup_logit_steal_to", e)
+                    matchup_steal_logit = 0.0
+
                 steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
                 p_steal = prob_from_scores(
                     rng,
@@ -1154,12 +1348,20 @@ def resolve_outcome(
                     off_score,
                     kind="steal",
                     variance_mult=steal_var,
-                    logit_delta=float(steal_logit_delta),
+                    logit_delta=float(steal_logit_delta) + float(matchup_steal_logit),
                     game_cfg=game_cfg,
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = None
+                    try:
+                        attach = 0.55 if outcome == "TO_HANDLE_LOSS" else 0.35
+                        if defender is not None and defender.pid and defense.is_on_court(defender.pid) and rng.random() < attach:
+                            stealer_pid = defender.pid
+                    except Exception:
+                        stealer_pid = None
+                    if not stealer_pid:
+                        stealer_pid = choose_stealer_pid(rng, defense)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -1180,6 +1382,7 @@ def resolve_outcome(
                             "p_steal": float(p_steal),
                             "p_lineout": float(p_lineout),
                             "steal_logit_delta": float(steal_logit_delta),
+                            "matchup_steal_logit_delta": float(matchup_steal_logit),
                         }
                     )
             except Exception as e:
@@ -1211,11 +1414,22 @@ def resolve_outcome(
         bonus_threshold = int(ctx.get("bonus_threshold", 5))
         def_on_court = ctx.get("def_on_court") or [p.pid for p in defense.on_court_players()]
 
-        # assign a random fouler from on-court defenders (MVP)
-        if def_on_court:
+        # Prefer the on-ball defender as the fouler when possible (matchup feel), then fall back.
+        try:
+            if defender is not None and defender.pid and defender.pid in def_on_court:
+                attach_p = float(pm.get("matchup_fouler_attach_p", 0.75))
+                attach_p = clamp(attach_p, 0.0, 1.0)
+                if rng.random() < attach_p and pf.get(defender.pid, 0) < foul_out_limit:
+                    fouler_pid = defender.pid
+        except Exception as e:
+            _record_exception("matchup_fouler_attach", e)
+
+        # fallback: assign a random fouler from on-court defenders (MVP)
+        if fouler_pid is None and def_on_court:
             fouler_pid = choose_fouler_pid(rng, defense, list(def_on_court), pf, foul_out_limit, outcome)
-            if fouler_pid:
-                pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
+
+        if fouler_pid:
+            pf[fouler_pid] = pf.get(fouler_pid, 0) + 1
 
         # update team fouls
         team_fouls[def_team_id] = int(team_fouls[def_team_id]) + 1
@@ -1296,6 +1510,30 @@ def resolve_outcome(
             else:
                 base_p *= _knob_mult(game_cfg, "shot_base_3_mult", 1.0)
 
+            # Matchup (plan1): on-ball defender delta -> logit adjustment (fouled-shot make)
+            matchup_logit = 0.0
+            try:
+                if defender is not None and match_pick is not None:
+                    delta_score = matchup.def_score_delta_from_defender(
+                        def_profile=OUTCOME_PROFILES.get(outcome, {}).get("defense", prof["defense"]),
+                        def_snap=def_snap,
+                        defender=defender,
+                        kind=kind,
+                    )
+                    mult = matchup.kind_mult_from_ctx("foul", offense, defense)
+                    matchup_logit = matchup.delta_to_logit(
+                        game_cfg=game_cfg,
+                        kind=kind,
+                        delta_score=delta_score,
+                        sign=-1.0,
+                        mult=mult,
+                    )
+                    if debug_q:
+                        foul_dbg["matchup_delta_score"] = float(delta_score)
+                        foul_dbg["matchup_logit_delta"] = float(matchup_logit)
+            except Exception as e:
+                _record_exception("matchup_logit_foul_draw", e)
+
             p_make = prob_from_scores(
                 rng,
                 base_p,
@@ -1303,7 +1541,8 @@ def resolve_outcome(
                 def_score,
                 kind=kind,
                 variance_mult=variance_mult,
-                logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
+                logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(matchup_logit),
+                 fatigue_logit_delta=fatigue_logit_delta,
                 fatigue_logit_delta=fatigue_logit_delta,
                 game_cfg=game_cfg,
             )
@@ -1418,6 +1657,8 @@ def resolve_outcome(
             "shot_made": shot_made,
             "and_one": and_one,
             "nfts": int(nfts),
+            **matchup_payload,
+            **matchup_dbg,
         }
         if isinstance(ft_res, Mapping):
             payload.update(ft_res)
