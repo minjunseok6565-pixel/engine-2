@@ -869,6 +869,9 @@ def simulate_game(
                 "first_fga_shotclock_sec": pos_first_fga_sc,
             }
 
+            # --- Matchup support (plan1): sticky on-ball defender selection per possession ---
+            ctx["_matchup_cache"] = {"by_actor": {}}
+
             # --- Possession time segmentation (supports in-possession forced subs) ---
             # NOTE: sim_possession shallow-copies ctx (ctx = dict(ctx)), so these must be MUTABLE
             # and updated in-place inside sim_possession to be visible here.
