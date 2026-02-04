@@ -33,6 +33,8 @@ from .prob import (
 from .profiles import OUTCOME_PROFILES, CORNER3_PROB_BY_ACTION_BASE
 from .models import GameState, Player, TeamState
 
+from . import matchups
+
 if TYPE_CHECKING:
     from .game_config import GameConfig
 
@@ -405,7 +407,40 @@ def resolve_outcome(
         actor = _pick_default_actor(offense)
         offense.tov += 1
         offense.add_player_stat(actor.pid, "TOV", 1)
-        return "TURNOVER", {"outcome": outcome, "pid": actor.pid}
+        # Matchup info (best-effort; also consume any one-shot matchup_force)
+        defender_pid, matchup_source, matchup_event = matchups.get_primary_defender_pid(
+            actor.pid, defense, ctx, off_player=actor
+        )
+        try:
+            force = ctx.get("matchup_force")
+            if isinstance(force, dict):
+                ttl = int(force.get("ttl", 1) or 1) - 1
+                if ttl <= 0:
+                    ctx.pop("matchup_force", None)
+                else:
+                    force["ttl"] = ttl
+        except Exception:
+            ctx.pop("matchup_force", None)
+
+        payload_sc = {
+            "outcome": outcome,
+            "pid": actor.pid,
+            "defender_pid": defender_pid,
+            "matchup_source": matchup_source,
+            "matchup_event": matchup_event,
+            "matchups_version": int(ctx.get("matchups_version", 0) or 0),
+        }
+        try:
+            ctx["matchup_last"] = {
+                "off_pid": actor.pid,
+                "def_pid": defender_pid,
+                "source": matchup_source,
+                "event": matchup_event,
+                "version": int(ctx.get("matchups_version", 0) or 0),
+            }
+        except Exception:
+            pass
+        return "TURNOVER", payload_sc
 
     def _record_exception(where: str, exc: BaseException) -> None:
         """Record exceptions into ctx for debugging without breaking sim flow."""
@@ -452,7 +487,24 @@ def resolve_outcome(
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
         clear_pass_tracking(ctx)
-        return "RESET", {"outcome": outcome}
+        # Consume one-shot forced matchup if present (avoid leaking into later steps).
+        try:
+            force = ctx.get("matchup_force")
+            if isinstance(force, dict):
+                ttl = int(force.get("ttl", 1) or 1) - 1
+                if ttl <= 0:
+                    ctx.pop("matchup_force", None)
+                else:
+                    force["ttl"] = ttl
+        except Exception:
+            ctx.pop("matchup_force", None)
+        return "RESET", {
+            "outcome": outcome,
+            "defender_pid": None,
+            "matchup_source": "fallback",
+            "matchup_event": None,
+            "matchups_version": int(ctx.get("matchups_version", 0) or 0),
+        }
 
     # choose participants
     if is_shot(outcome):
@@ -497,12 +549,93 @@ def resolve_outcome(
             # consume (one-shot) to avoid leaking into subsequent steps
             ctx.pop("force_actor_pid", None)
 
+    # --- Matchups (Plan-1 MVP) ---
+    defender_pid: Optional[str] = None
+    matchup_source: str = "fallback"
+    matchup_event: Optional[str] = None
+
+    # Apply and consume one-shot forced matchup (ttl) if it targets this actor.
+    try:
+        force = ctx.get("matchup_force")
+        force_def_pid: Optional[str] = None
+        force_event: Optional[str] = None
+        if isinstance(force, dict):
+            f_off = str(force.get("off_pid") or "").strip()
+            f_def = str(force.get("def_pid") or "").strip()
+            if f_off and f_def and f_off == actor.pid and defense.is_on_court(f_def):
+                force_def_pid = f_def
+                force_event = str(force.get("event") or "") or None
+            try:
+                ttl = int(force.get("ttl", 1) or 1) - 1
+                if ttl <= 0:
+                    ctx.pop("matchup_force", None)
+                else:
+                    force["ttl"] = ttl
+            except Exception:
+                ctx.pop("matchup_force", None)
+
+        if force_def_pid:
+            defender_pid = force_def_pid
+            matchup_source = "force"
+            matchup_event = force_event
+        else:
+            defender_pid, matchup_source, matchup_event = matchups.get_primary_defender_pid(
+                actor.pid, defense, ctx, off_player=actor
+            )
+    except Exception as e:
+        _record_exception("matchup_primary_defender", e)
+        defender_pid, matchup_source, matchup_event = None, "fallback", None
+
+    try:
+        ctx["matchup_last"] = {
+            "off_pid": actor.pid,
+            "def_pid": defender_pid,
+            "source": matchup_source,
+            "event": matchup_event,
+            "version": int(ctx.get("matchups_version", 0) or 0),
+        }
+    except Exception:
+        pass
+
+    def _with_matchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        payload["defender_pid"] = defender_pid
+        payload["matchup_source"] = matchup_source
+        payload["matchup_event"] = matchup_event
+        payload["matchups_version"] = int(ctx.get("matchups_version", 0) or 0)
+        return payload
+
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
 
     # compute scores
     off_vals = {k: actor.get(k) for k in prof["offense"].keys()}
     off_score = dot_profile(off_vals, prof["offense"])
-    def_vals = {k: float(def_snap.get(k, 50.0)) for k in prof["defense"].keys()}
+    # Blend team defense snapshot with the primary defender stats (per-key weights).
+    blend = ctx.get("matchup_def_blend", {}) or {}
+    if not isinstance(blend, Mapping):
+        blend = {}
+
+    defender_player = None
+    try:
+        if defender_pid:
+            defender_player = defense.find_player(defender_pid)
+            if defender_player is not None and not defense.is_on_court(defender_pid):
+                defender_player = None
+    except Exception as e:
+        _record_exception("matchup_defender_lookup", e)
+        defender_player = None
+
+    def_vals = {}
+    for k in prof["defense"].keys():
+        t_val = float(def_snap.get(k, 50.0))
+        d_val = float(engine_get_stat(defender_player, k, 50.0)) if defender_player is not None else 50.0
+        try:
+            w = float(blend.get(k, 0.5))
+        except Exception:
+            w = 0.5
+        w = clamp(w, 0.0, 1.0)
+        def_vals[k] = (w * d_val) + ((1.0 - w) * t_val)
     def_score = dot_profile(def_vals, prof["defense"])
 
     fatigue_map = ctx.get("fatigue_map", {}) or {}
@@ -707,7 +840,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "SCORE", {
+            return "SCORE", _with_matchup({
                 "outcome": outcome,
                 "pid": actor.pid,
                 "points": pts,
@@ -715,7 +848,7 @@ def resolve_outcome(
                 "assisted": assisted,
                 "assister_pid": assister_pid,
                 **shot_dbg,
-            }
+            })
         else:
             payload = {
                 "outcome": outcome,
@@ -774,7 +907,7 @@ def resolve_outcome(
                 _record_exception("block_model", e)
                 
             clear_pass_tracking(ctx)
-            return "MISS", payload
+            return "MISS", _with_matchup(payload)
 
 
     if is_pass(outcome):
@@ -939,7 +1072,7 @@ def resolve_outcome(
 
             clear_pass_tracking(ctx)
 
-            return "TURNOVER", payload
+            return "TURNOVER", _with_matchup(payload)
 
 
         # Probabilistic bucket 2: reset chance increases as q_score drops below t_reset.
@@ -964,7 +1097,7 @@ def resolve_outcome(
                 )
             clear_pass_tracking(ctx)
                 
-            return "RESET", payload
+            return "RESET", _with_matchup(payload)
 
         # For normal quality passes: sample completion. On success, store carry bucket.
         if rng.random() < p_ok:
@@ -1028,7 +1161,7 @@ def resolve_outcome(
                         "p_ok": float(p_ok),
                     }
                 )
-            return "CONTINUE", payload
+            return "CONTINUE", _with_matchup(payload)
 
         # PASS failed (but not catastrophic enough to be a bad-pass turnover)
         payload = {"outcome": outcome, "type": "PASS_FAIL"}
@@ -1038,7 +1171,7 @@ def resolve_outcome(
             )
         clear_pass_tracking(ctx)
         
-        return "RESET", payload
+        return "RESET", _with_matchup(payload)
 
     if is_to(outcome):
         clear_pass_tracking(ctx)
@@ -1185,7 +1318,7 @@ def resolve_outcome(
             except Exception as e:
                 _record_exception("steal_split_to", e)
 
-        return "TURNOVER", payload
+        return "TURNOVER", _with_matchup(payload)
 
     if is_foul(outcome):
         fouler_pid = None
@@ -1227,7 +1360,9 @@ def resolve_outcome(
             if fouler_pid and pf.get(fouler_pid, 0) >= foul_out_limit:
                 game_state.fatigue[def_team_id][fouler_pid] = 0.0
             clear_pass_tracking(ctx)
-            return "FOUL_NO_SHOTS", {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+            return "FOUL_NO_SHOTS", _with_matchup(
+                {"outcome": outcome, "pid": actor.pid, "fouler": fouler_pid, "bonus": False}
+            )
 
         # Otherwise: free throws (bonus or shooting)
         shot_made = False
@@ -1424,12 +1559,12 @@ def resolve_outcome(
         if isinstance(foul_dbg, Mapping) and foul_dbg:
             payload.update(foul_dbg)
         clear_pass_tracking(ctx)
-        return "FOUL_FT", payload
+        return "FOUL_FT", _with_matchup(payload)
 
 
     if is_reset(outcome):
         clear_pass_tracking(ctx)
-        return "RESET", {"outcome": outcome}
+        return "RESET", _with_matchup({"outcome": outcome})
 
     clear_pass_tracking(ctx)
-    return "RESET", {"outcome": outcome}
+    return "RESET", _with_matchup({"outcome": outcome})
