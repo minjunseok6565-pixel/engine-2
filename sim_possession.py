@@ -767,7 +767,13 @@ def simulate_possession(
             return
         try:
             tctx = getattr(getattr(offense, "tactics", None), "context", None)
-            raw = tctx.get("MATCHUP_FORCE") if isinstance(tctx, dict) else None
+            # Policy A: Always consume (pop) the one-shot command the first time we see it
+            # in this possession, regardless of whether it is valid/applicable.
+            # This ensures the UX matches "one-shot" and prevents repetition across
+            # continuation segments or future possessions.
+            raw = None
+            if isinstance(tctx, dict):
+                raw = tctx.pop("MATCHUP_FORCE", None)
             if not isinstance(raw, dict):
                 return
 
