@@ -54,8 +54,8 @@ def build_matchups(
 
     off_players = offense.on_court_players()
     def_players = defense.on_court_players()
-    off_pids = [p.pid for p in off_players]
-    def_pids = [p.pid for p in def_players]
+    off_pids = [str(p.pid) for p in off_players]
+    def_pids = [str(p.pid) for p in def_players]
 
     # Extract defensive instructions (LOCK/HIDE) – keep JSON-friendly.
     locks_raw = _extract_locks(defense)
@@ -66,9 +66,9 @@ def build_matchups(
     hides = [pid for pid in hides_raw if pid in set(def_pids)]
 
     # Precompute threat + buckets.
-    threat = {p.pid: _threat_score(p) for p in off_players}
-    off_bucket = {p.pid: _bucket_offense_player(p) for p in off_players}
-    def_bucket = {p.pid: _bucket_defense_player(p) for p in def_players}
+    threat = {str(p.pid): _threat_score(p) for p in off_players}
+    off_bucket = {str(p.pid): _bucket_offense_player(p) for p in off_players}
+    def_bucket = {str(p.pid): _bucket_defense_player(p) for p in def_players}
 
     # Fixed assignments from locks (after normalization).
     fixed_off: set[str] = set()
@@ -95,8 +95,8 @@ def build_matchups(
         remaining_def = list(def_pids)
 
     # Build pid->Player maps for fast access.
-    off_by_pid = {p.pid: p for p in off_players}
-    def_by_pid = {p.pid: p for p in def_players}
+    off_by_pid = {str(p.pid): p for p in off_players}
+    def_by_pid = {str(p.pid): p for p in def_players}
 
     def _pair_score(off_pid: str, def_pid: str) -> float:
         op = off_by_pid.get(off_pid)
@@ -396,8 +396,8 @@ def _fallback_defender_pid(defense: TeamState, off_player: Optional[Player]) -> 
     if off_player is None:
         # Safe fallback: best POA defender.
         best = max(defenders, key=lambda p: engine_get_stat(p, "DEF_POA", 50.0))
-        return best.pid if best else None
+        return str(best.pid) if best else None
 
     ob = _bucket_offense_player(off_player)
     best = max(defenders, key=lambda p: _def_capability(p, ob))
-    return best.pid if best else None
+    return str(best.pid) if best else None
