@@ -567,6 +567,9 @@ def simulate_possession(
     if not is_continuation:
         offense.possessions += 1
         before_pts = int(offense.pts)
+        # Allow exactly one MATCHUP_SET per possession.
+        # Continuation calls (e.g. no-shot foul restart) should not re-emit the initial 5v5 map.
+        ctx.pop("_matchup_set_emitted", None)
     else:
         before_pts = int(ctx.get("_pos_before_pts", int(offense.pts)))
 
@@ -689,6 +692,32 @@ def simulate_possession(
             # No-op if lineup snapshot is unchanged.
             if isinstance(ctx.get("matchups_map"), dict):
                 if ctx.get("matchups_off_on_court") == snap_off and ctx.get("matchups_def_on_court") == snap_def:
+                    # Even if the 5v5 map is unchanged, we still want one MATCHUP_SET at possession start
+                    # for replay / text commentary.
+                    if reason == "pos_start" and not bool(ctx.get("_matchup_set_emitted", False)):
+                        try:
+                            m_map = ctx.get("matchups_map") or {}
+                            m_meta = ctx.get("matchups_meta") or {}
+                            pairs = [
+                                {"off_pid": str(op), "def_pid": str(m_map.get(op, "") or "")}
+                                for op in new_off
+                            ]
+                            emit_event(
+                                game_state,
+                                event_type="MATCHUP_SET",
+                                home=home_team,
+                                away=away_team,
+                                rules=rules,
+                                team_id=off_team_id,
+                                opp_team_id=def_team_id,
+                                pos_start=str(pos_origin),
+                                matchups_version=int(ctx.get("matchups_version", 0) or 0),
+                                pairs=pairs,
+                                meta=dict(m_meta) if isinstance(m_meta, dict) else {},
+                            )
+                            ctx["_matchup_set_emitted"] = True
+                        except Exception:
+                            pass
                     return
 
             m_map, m_rev, m_meta = matchups.build_matchups(offense, defense, ctx, rng=rng)
@@ -700,7 +729,8 @@ def simulate_possession(
             ctx["matchups_rev"] = m_rev
             ctx["matchups_meta"] = m_meta
 
-            if bool(ctx.get("debug_matchups", False)):
+            # Always emit once at possession start (for replay / text commentary).
+            if reason == "pos_start" and not bool(ctx.get("_matchup_set_emitted", False)):
                 try:
                     pairs = [
                         {"off_pid": str(op), "def_pid": str(m_map.get(op, "") or "")}
@@ -719,6 +749,7 @@ def simulate_possession(
                         pairs=pairs,
                         meta=dict(m_meta) if isinstance(m_meta, dict) else {},
                     )
+                    ctx["_matchup_set_emitted"] = True
                 except Exception:
                     pass
         except Exception as exc:
