@@ -597,8 +597,7 @@ def simulate_possession(
     team_style = ensure_team_style(rng, offense, rules)
     if team_style:
         tempo_mult *= float(team_style.get("tempo_mult", 1.0))
-        # keep ctx immutable-ish
-        ctx = dict(ctx)
+        # mutate ctx in-place (continuation must preserve possession-scope flags)
         ctx["tempo_mult"] = tempo_mult
         ctx["team_style"] = team_style
 
@@ -1372,8 +1371,8 @@ def simulate_possession(
                 if forced_out:
 
                     # --- segment close (minutes/fatigue accounting in sim_game) ---
-                    # NOTE: sim_possession shallow-copies ctx earlier (ctx = dict(ctx)),
-                    # so we must mutate shared objects in-place for sim_game to see changes.
+                    # NOTE: ctx is mutated in-place (no shallow copy); keep shared objects in-place for sim_game bookkeeping.
+                    # This ensures sim_game can observe segment/flags across continuation.
                     try:
                         segments = ctx.get("_time_segments")
                         last_ref = ctx.get("_seg_last_clock_sec")
