@@ -686,8 +686,11 @@ def simulate_possession(
             if len(new_def) != 5:
                 new_def = [p.pid for p in defense.on_court_players()]
 
-            snap_off = sorted([str(x) for x in new_off if str(x)])
-            snap_def = sorted([str(x) for x in new_def if str(x)])
+            # PID normalization: keep a stable on-court order for emit, and a sorted snapshot for cache checks.
+            off_order = [str(x) for x in new_off if str(x)]
+            def_order = [str(x) for x in new_def if str(x)]
+            snap_off = sorted(off_order)
+            snap_def = sorted(def_order)
 
             # No-op if lineup snapshot is unchanged.
             if isinstance(ctx.get("matchups_map"), dict):
@@ -699,8 +702,8 @@ def simulate_possession(
                             m_map = ctx.get("matchups_map") or {}
                             m_meta = ctx.get("matchups_meta") or {}
                             pairs = [
-                                {"off_pid": str(op), "def_pid": str(m_map.get(op, "") or "")}
-                                for op in new_off
+                                {"off_pid": opid, "def_pid": str(m_map.get(opid, "") or "")}
+                                for opid in off_order
                             ]
                             emit_event(
                                 game_state,
@@ -722,6 +725,15 @@ def simulate_possession(
 
             m_map, m_rev, m_meta = matchups.build_matchups(offense, defense, ctx, rng=rng)
 
+            # Defensive normalization (belt-and-suspenders): ensure ctx always stores string pids.
+            try:
+                if isinstance(m_map, dict):
+                    m_map = {str(k): str(v) for k, v in m_map.items() if str(k)}
+                if isinstance(m_rev, dict):
+                    m_rev = {str(k): str(v) for k, v in m_rev.items() if str(k)}
+            except Exception:
+                pass
+
             ctx["matchups_version"] = int(ctx.get("matchups_version", 0) or 0) + 1
             ctx["matchups_off_on_court"] = snap_off
             ctx["matchups_def_on_court"] = snap_def
@@ -733,8 +745,8 @@ def simulate_possession(
             if reason == "pos_start" and not bool(ctx.get("_matchup_set_emitted", False)):
                 try:
                     pairs = [
-                        {"off_pid": str(op), "def_pid": str(m_map.get(op, "") or "")}
-                        for op in new_off
+                        {"off_pid": opid, "def_pid": str(m_map.get(opid, "") or "")}
+                        for opid in off_order
                     ]
                     emit_event(
                         game_state,
