@@ -698,6 +698,12 @@ def simulate_game(
         pos_origin_start = ""
         pos_first_fga_sc = None
 
+        # Possession-scope context:
+        # Preserve a single ctx dict across DEADBALL_STOP continuation segments so that
+        # per-possession guards in sim_possession (e.g., _matchup_set_emitted to ensure
+        # MATCHUP_SET is emitted only once per possession) remain effective.
+        pos_ctx: Optional[Dict[str, Any]] = None
+
 
         while game_state.clock_sec > 0:
             game_state.possession = total_possessions
@@ -835,55 +841,92 @@ def simulate_game(
                 else int(rules.get("bonus_threshold", 5))
             )
 
-            ctx = {
-                "game_id": game_id,
-                "off_team_id": off_team_id,
-                "def_team_id": def_team_id,
-                "score_diff": score_diff,
-                "pressure_index": float(pressure_index),
-                "garbage_index": float(garbage_index),
-                "variance_mult": variance_mult,
-                "tempo_mult": tempo_mult,
-                "avg_fatigue_off": avg_off_fatigue,
-                "fatigue_bad_mult_max": float(rules.get("fatigue_effects", {}).get("bad_mult_max", 1.12)),
-                "fatigue_bad_critical": float(rules.get("fatigue_effects", {}).get("bad_critical", 0.25)),
-                "fatigue_bad_bonus": float(rules.get("fatigue_effects", {}).get("bad_bonus", 0.08)),
-                "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
-                "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
-                "fatigue_logit_red_crit": float(rules.get("fatigue_effects", {}).get("logit_red_crit", 0.0)),
-                "fatigue_logit_red_max": float(rules.get("fatigue_effects", {}).get("logit_red_max", 0.0)),
-                "fatigue_logit_red_pow": float(rules.get("fatigue_effects", {}).get("logit_red_pow", 1.0)),
-                "fatigue_map": off_fatigue_map,
-                "def_on_court": def_on_court,
-                "off_on_court": off_on_court,
-                "foul_out": int(rules.get("foul_out", 6)),
-                "bonus_threshold": bonus_threshold,
-                "pos_start": pos_start,
-                "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"),
+            # Possession-scope ctx:
+            # - Create once at possession start.
+            # - Reuse across DEADBALL_STOP continuation segments so per-possession flags
+            #   (e.g., _matchup_set_emitted) remain effective.
+            # - Overwrite segment-varying values each loop iteration.
+            if (not pos_is_continuation) or (pos_ctx is None):
+                ctx = {
+                    "game_id": game_id,
+                    "off_team_id": off_team_id,
+                    "def_team_id": def_team_id,
+                    "score_diff": score_diff,
+                    "pressure_index": float(pressure_index),
+                    "garbage_index": float(garbage_index),
+                    "variance_mult": variance_mult,
+                    "tempo_mult": tempo_mult,
+                    "avg_fatigue_off": avg_off_fatigue,
+                    "fatigue_bad_mult_max": float(rules.get("fatigue_effects", {}).get("bad_mult_max", 1.12)),
+                    "fatigue_bad_critical": float(rules.get("fatigue_effects", {}).get("bad_critical", 0.25)),
+                    "fatigue_bad_bonus": float(rules.get("fatigue_effects", {}).get("bad_bonus", 0.08)),
+                    "fatigue_bad_cap": float(rules.get("fatigue_effects", {}).get("bad_cap", 1.20)),
+                    "fatigue_logit_max": float(rules.get("fatigue_effects", {}).get("logit_delta_max", -0.25)),
+                    "fatigue_logit_red_crit": float(rules.get("fatigue_effects", {}).get("logit_red_crit", 0.0)),
+                    "fatigue_logit_red_max": float(rules.get("fatigue_effects", {}).get("logit_red_max", 0.0)),
+                    "fatigue_logit_red_pow": float(rules.get("fatigue_effects", {}).get("logit_red_pow", 1.0)),
+                    "fatigue_map": off_fatigue_map,
+                    "def_on_court": def_on_court,
+                    "off_on_court": off_on_court,
+                    "foul_out": int(rules.get("foul_out", 6)),
+                    "bonus_threshold": bonus_threshold,
+                    "pos_start": pos_start,
+                    "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"),
 
-                # Possession-continuation support (used by sim_possession).
-                "_pos_continuation": pos_is_continuation,
-                "_pos_before_pts": pos_before_pts,
-                "_pos_had_orb": pos_had_orb,
-                "_pos_origin_start": pos_origin_start,
-                "first_fga_shotclock_sec": pos_first_fga_sc,
+                    # Possession-continuation support (used by sim_possession).
+                    "_pos_continuation": pos_is_continuation,
+                    "_pos_before_pts": pos_before_pts,
+                    "_pos_had_orb": pos_had_orb,
+                    "_pos_origin_start": pos_origin_start,
+                    "first_fga_shotclock_sec": pos_first_fga_sc,
 
-                # --- Matchups (Plan-1 MVP) ---
-                # Version increments when sim_possession rebuilds matchups for a new segment/lineup.
-                "matchups_version": 0,
-                # Defender-vs-team blending weights for defense keys (0..1 = primary defender weight).
-                "matchup_def_blend": {
-                    "DEF_POA": 0.85,
-                    "DEF_STEAL": 0.75,
-                    "DEF_POST": 0.80,
-                    "DEF_RIM": 0.25,
-                    "DEF_HELP": 0.30,
-                    "PHYSICAL": 0.50,
-                    "ENDURANCE": 0.50,
-                },
-                # If true, sim_possession may emit MATCHUP_SET / MATCHUP_EVENT debug replay entries.
-                "debug_matchups": bool(rules.get("debug_matchups", False)),
-            }
+                    # --- Matchups (Plan-1 MVP) ---
+                    # Version increments when sim_possession rebuilds matchups for a new segment/lineup.
+                    "matchups_version": 0,
+                    # Defender-vs-team blending weights for defense keys (0..1 = primary defender weight).
+                    "matchup_def_blend": {
+                        "DEF_POA": 0.85,
+                        "DEF_STEAL": 0.75,
+                        "DEF_POST": 0.80,
+                        "DEF_RIM": 0.25,
+                        "DEF_HELP": 0.30,
+                        "PHYSICAL": 0.50,
+                        "ENDURANCE": 0.50,
+                    },
+                    # If true, sim_possession may emit MATCHUP_SET / MATCHUP_EVENT debug replay entries.
+                    "debug_matchups": bool(rules.get("debug_matchups", False)),
+                }
+                pos_ctx = ctx
+            else:
+                ctx = pos_ctx
+                ctx.update(
+                    {
+                        "game_id": game_id,
+                        "off_team_id": off_team_id,
+                        "def_team_id": def_team_id,
+                        "score_diff": score_diff,
+                        "pressure_index": float(pressure_index),
+                        "garbage_index": float(garbage_index),
+                        "variance_mult": variance_mult,
+                        "tempo_mult": tempo_mult,
+                        "avg_fatigue_off": avg_off_fatigue,
+                        "fatigue_map": off_fatigue_map,
+                        "def_on_court": def_on_court,
+                        "off_on_court": off_on_court,
+                        "foul_out": int(rules.get("foul_out", 6)),
+                        "bonus_threshold": bonus_threshold,
+                        "pos_start": pos_start,
+                        "dead_ball_inbound": pos_start in ("start_q", "after_score", "after_tov_dead", "after_foul", "after_block_oob"),
+
+                        # Continuation aggregate snapshots.
+                        "_pos_continuation": pos_is_continuation,
+                        "_pos_before_pts": pos_before_pts,
+                        "_pos_had_orb": pos_had_orb,
+                        "_pos_origin_start": pos_origin_start,
+                        "first_fga_shotclock_sec": pos_first_fga_sc,
+                    }
+                )
+                pos_ctx = ctx
 
             # Optional override from defense tactics context (JSON-friendly dict of {DEF_KEY: weight}).
             try:
