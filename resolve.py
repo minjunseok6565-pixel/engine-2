@@ -414,11 +414,14 @@ def resolve_outcome(
         try:
             force = ctx.get("matchup_force")
             if isinstance(force, dict):
-                ttl = int(force.get("ttl", 1) or 1) - 1
-                if ttl <= 0:
-                    ctx.pop("matchup_force", None)
-                else:
-                    force["ttl"] = ttl
+                f_off = str(force.get("off_pid") or "").strip()
+                f_def = str(force.get("def_pid") or "").strip()
+                if f_off and f_def and f_off == actor.pid and defense.is_on_court(f_def):
+                    ttl = int(force.get("ttl", 1) or 1) - 1
+                    if ttl <= 0:
+                        ctx.pop("matchup_force", None)
+                    else:
+                        force["ttl"] = ttl
         except Exception:
             ctx.pop("matchup_force", None)
 
@@ -487,17 +490,6 @@ def resolve_outcome(
     prof = OUTCOME_PROFILES.get(outcome)
     if not prof:
         clear_pass_tracking(ctx)
-        # Consume one-shot forced matchup if present (avoid leaking into later steps).
-        try:
-            force = ctx.get("matchup_force")
-            if isinstance(force, dict):
-                ttl = int(force.get("ttl", 1) or 1) - 1
-                if ttl <= 0:
-                    ctx.pop("matchup_force", None)
-                else:
-                    force["ttl"] = ttl
-        except Exception:
-            ctx.pop("matchup_force", None)
         return "RESET", {
             "outcome": outcome,
             "defender_pid": None,
@@ -555,6 +547,7 @@ def resolve_outcome(
     matchup_event: Optional[str] = None
 
     # Apply and consume one-shot forced matchup (ttl) if it targets this actor.
+    # IMPORTANT: ttl is only consumed when the forced matchup is *actually applied* on a terminal on-ball event.
     try:
         force = ctx.get("matchup_force")
         force_def_pid: Optional[str] = None
@@ -565,14 +558,17 @@ def resolve_outcome(
             if f_off and f_def and f_off == actor.pid and defense.is_on_court(f_def):
                 force_def_pid = f_def
                 force_event = str(force.get("event") or "") or None
-            try:
-                ttl = int(force.get("ttl", 1) or 1) - 1
-                if ttl <= 0:
-                    ctx.pop("matchup_force", None)
-                else:
-                    force["ttl"] = ttl
-            except Exception:
-                ctx.pop("matchup_force", None)
+
+                is_terminal = bool(is_shot(outcome) or is_to(outcome) or (is_foul(outcome) and outcome.startswith("FOUL_DRAW_")))
+                if is_terminal:
+                    try:
+                        ttl = int(force.get("ttl", 1) or 1) - 1
+                        if ttl <= 0:
+                            ctx.pop("matchup_force", None)
+                        else:
+                            force["ttl"] = ttl
+                    except Exception:
+                        ctx.pop("matchup_force", None)
 
         if force_def_pid:
             defender_pid = force_def_pid
@@ -597,6 +593,18 @@ def resolve_outcome(
     except Exception:
         pass
 
+    # Tactical context (read-only defaults): defensive help + double/trap.
+    try:
+        help_level = float(ctx.get("team_help_level", 0.0) or 0.0)
+    except Exception:
+        help_level = 0.0
+    help_level = clamp(help_level, -1.0, 1.0)
+
+    double_strength: float = 0.0
+    double_doubler_pid: Optional[str] = None
+    double_source: Optional[str] = None
+    double_label: Optional[str] = None
+
     def _with_matchup(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
@@ -604,6 +612,12 @@ def resolve_outcome(
         payload["matchup_source"] = matchup_source
         payload["matchup_event"] = matchup_event
         payload["matchups_version"] = int(ctx.get("matchups_version", 0) or 0)
+        # Tactical knobs (for replay/text): always include, defaulting to neutral.
+        payload["help_level"] = float(help_level)
+        payload["double_strength"] = float(double_strength)
+        payload["double_doubler_pid"] = double_doubler_pid
+        payload["double_source"] = double_source
+        payload["double_label"] = double_label
         return payload
 
     variance_mult = _team_variance_mult(offense, game_cfg) * float(ctx.get("variance_mult", 1.0))
@@ -669,6 +683,207 @@ def resolve_outcome(
             _record_exception("carry_logit_delta_pop", e)
             carry_in = 0.0
 
+
+    # --- Double / trap resolution (possession-scoped) ---
+    # We keep this lightweight: apply small, clear tradeoffs without changing the flow-control shape
+    # (i.e., we do not convert a SHOT outcome into a PASS outcome here).
+    def _best_threat_pid() -> Optional[str]:
+        best_pid = None
+        best_val = float("-inf")
+        try:
+            for p in offense.on_court_players():
+                pid = str(getattr(p, "pid", "") or "").strip()
+                if not pid:
+                    continue
+                try:
+                    val = float(matchups._threat_score(p))
+                except Exception:
+                    val = float(engine_get_stat(p, "PASS_CREATE", 50.0))
+                if val > best_val + 1e-9:
+                    best_val = val
+                    best_pid = pid
+        except Exception:
+            return None
+        return best_pid
+
+    def _choose_def_by_tag(tag: str, exclude: set[str]) -> Optional[str]:
+        t = str(tag or "").strip().upper()
+        best_pid = None
+        best_val = float("-inf")
+        for p in defense.on_court_players():
+            pid = str(getattr(p, "pid", "") or "").strip()
+            if not pid or pid in exclude:
+                continue
+            if t == "BEST_HELP":
+                val = float(engine_get_stat(p, "DEF_HELP", 50.0))
+            elif t == "BEST_POA":
+                val = float(engine_get_stat(p, "DEF_POA", 50.0))
+            elif t == "BEST_POST":
+                val = float(engine_get_stat(p, "DEF_POST", 50.0))
+            else:  # BEST_STEAL (default)
+                val = float(engine_get_stat(p, "DEF_STEAL", 50.0))
+            if val > best_val + 1e-9:
+                best_val = val
+                best_pid = pid
+        return best_pid
+
+    def _resolve_doubler_pid(spec: Any, exclude: set[str]) -> Optional[str]:
+        # spec may be dict ({def_pid, tag}) or a direct pid string.
+        if isinstance(spec, Mapping):
+            dpid = str(spec.get("def_pid") or "").strip()
+            if dpid and defense.is_on_court(dpid) and dpid not in exclude:
+                return dpid
+            tag = str(spec.get("tag") or "").strip().upper()
+            if tag:
+                return _choose_def_by_tag(tag, exclude)
+            return None
+        s = str(spec or "").strip()
+        if s and defense.is_on_court(s) and s not in exclude:
+            return s
+        return None
+
+    def _resolve_double_from_ctx(consume: bool) -> Optional[Tuple[float, Optional[str], Optional[str], Optional[str]]]:
+        spec = ctx.get("double_active")
+        if not isinstance(spec, dict):
+            return None
+        off_pid = str(spec.get("off_pid") or "").strip()
+        if not off_pid or off_pid != actor.pid:
+            return None
+        try:
+            ttl = int(spec.get("ttl", 1) or 1)
+        except Exception:
+            ttl = 1
+        if ttl <= 0:
+            return None
+
+        try:
+            strength = float(spec.get("strength", 0.0) or 0.0)
+        except Exception:
+            strength = 0.0
+        strength = clamp(strength, 0.0, 1.0)
+
+        exclude = set([str(defender_pid or "").strip()]) if defender_pid else set()
+        doubler = str(spec.get("doubler_pid") or "").strip()
+        if doubler and (not defense.is_on_court(doubler) or doubler in exclude):
+            doubler = ""
+        if not doubler:
+            doubler = _resolve_doubler_pid(spec.get("doubler"), exclude) or ""
+        if not doubler:
+            tag = str(spec.get("doubler_tag") or "").strip().upper()
+            if tag:
+                doubler = _choose_def_by_tag(tag, exclude) or ""
+        doubler_pid = doubler if doubler else None
+
+        source = str(spec.get("source") or "CTX") or "CTX"
+        label = str(spec.get("label") or "").strip() or None
+
+        if consume:
+            try:
+                ttl2 = ttl - 1
+                if ttl2 <= 0:
+                    ctx.pop("double_active", None)
+                else:
+                    spec["ttl"] = ttl2
+            except Exception:
+                ctx.pop("double_active", None)
+
+        if strength <= 1e-9:
+            return None
+        return (float(strength), doubler_pid, source, label)
+
+    def _resolve_double_from_rules() -> Optional[Tuple[float, Optional[str], Optional[str], Optional[str]]]:
+        dctx = getattr(getattr(defense, "tactics", None), "context", None)
+        if not isinstance(dctx, dict):
+            return None
+        rules = dctx.get("DOUBLE_RULES")
+        if not isinstance(rules, list) or not rules:
+            return None
+
+        exclude = set([str(defender_pid or "").strip()]) if defender_pid else set()
+        best_pid = None
+
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+
+            # Base-action gating.
+            wba = rule.get("when_base_actions")
+            if isinstance(wba, list) and wba:
+                if base_action not in set(str(x) for x in wba if str(x)):
+                    continue
+
+            target = rule.get("target")
+            if not isinstance(target, Mapping):
+                target = rule
+
+            off_pid = str(target.get("off_pid") or "").strip()
+            off_role = str(target.get("off_role") or "").strip()
+            tag = str(target.get("tag") or "").strip().upper()
+
+            matched = False
+            if off_pid and off_pid == actor.pid:
+                matched = True
+            elif off_role:
+                try:
+                    roles = getattr(offense, "roles", None)
+                    if isinstance(roles, Mapping):
+                        rp = str(roles.get(off_role) or "").strip()
+                        if rp and rp == actor.pid:
+                            matched = True
+                except Exception:
+                    matched = False
+            elif tag == "BEST_THREAT":
+                if best_pid is None:
+                    best_pid = _best_threat_pid()
+                if best_pid and best_pid == actor.pid:
+                    matched = True
+
+            if not matched:
+                continue
+
+            try:
+                strength = float(rule.get("strength", 0.65) or 0.65)
+            except Exception:
+                strength = 0.65
+            strength = clamp(strength, 0.0, 1.0)
+            if strength <= 1e-9:
+                continue
+
+            doubler_spec = rule.get("doubler")
+            if doubler_spec is None:
+                doubler_spec = rule.get("doubler_pid")
+            if doubler_spec is None:
+                tag2 = str(rule.get("doubler_tag") or "").strip().upper()
+                if tag2:
+                    doubler_spec = {"tag": tag2}
+
+            doubler_pid = _resolve_doubler_pid(doubler_spec, exclude)
+            label = str(rule.get("label") or "").strip() or None
+
+            return (float(strength), doubler_pid, "RULE", label)
+
+        return None
+
+    # Resolve a double spec if applicable to this (actor, outcome).
+    double_can_apply = bool(is_shot(outcome) or is_pass(outcome) or is_to(outcome) or (is_foul(outcome) and outcome.startswith("FOUL_DRAW_")))
+    if double_can_apply:
+        try:
+            resolved = _resolve_double_from_ctx(consume=True)
+            if resolved is None:
+                resolved = _resolve_double_from_rules()
+            if resolved is not None:
+                ds, dp, src, lbl = resolved
+                double_strength = float(clamp(ds, 0.0, 1.0))
+                double_doubler_pid = dp
+                double_source = src
+                double_label = lbl
+        except Exception as e:
+            _record_exception("double_resolve", e)
+            double_strength = 0.0
+            double_doubler_pid = None
+            double_source = None
+            double_label = None
+
     # resolve by type
     if is_shot(outcome):
         # QUALITY: scheme structure + defensive role stats -> logit delta (shot).
@@ -731,6 +946,23 @@ def resolve_outcome(
         if debug_q:
             shot_dbg["putback_pen"] = float(putback_pen)
 
+        # Help defense / double pressure adjustments (logit space).
+        help_shot_ld = 0.0
+        if abs(float(help_level)) > 1e-9:
+            if kind == "shot_rim":
+                help_shot_ld = -0.10 * float(help_level)
+            elif kind == "shot_post":
+                help_shot_ld = -0.08 * float(help_level)
+            elif kind == "shot_mid":
+                help_shot_ld = -0.03 * float(help_level)
+            else:  # shot_3
+                help_shot_ld = 0.09 * float(help_level)
+
+        double_shot_pen = (-0.22 * float(double_strength)) if float(double_strength) > 1e-9 else 0.0
+        if debug_q:
+            shot_dbg["help_shot_ld"] = float(help_shot_ld)
+            shot_dbg["double_shot_pen"] = float(double_shot_pen)
+
         p_make = prob_from_scores(
             rng,
             base_p,
@@ -738,7 +970,7 @@ def resolve_outcome(
             def_score,
             kind=kind,
             variance_mult=variance_mult,
-            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(putback_pen),
+            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + float(putback_pen) + float(help_shot_ld) + float(double_shot_pen),
             fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
@@ -922,7 +1154,7 @@ def resolve_outcome(
             def_score,
             kind="pass",
             variance_mult=variance_mult,
-            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in),
+            logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + (-0.04 * float(help_level)) + (-0.16 * float(double_strength)),
             fatigue_logit_delta=fatigue_logit_delta,
             game_cfg=game_cfg,
         )
@@ -999,7 +1231,7 @@ def resolve_outcome(
                 bp_norm = 0.0
 
         to_logit_raw = float(s_to * (t_to - q_score))
-        to_logit_eff = float(to_logit_raw - (bp_norm * passer_span))
+        to_logit_eff = float(to_logit_raw - (bp_norm * passer_span) + (0.12 * float(help_level)) + (0.20 * float(double_strength)))
         p_to = float(sigmoid(to_logit_eff))
         p_to_raw = float(sigmoid(to_logit_raw)) if debug_q else None
         if rng.random() < p_to:
@@ -1040,7 +1272,7 @@ def resolve_outcome(
 
                 def_feat = getattr(style, "def_features", {}) if style is not None else {}
                 d_press = float(def_feat.get("D_STEAL_PRESS", 0.5))
-                steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+                steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10 + (0.18 * float(help_level)) + (0.22 * float(double_strength))
 
                 steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
                 p_steal = prob_from_scores(
@@ -1055,7 +1287,14 @@ def resolve_outcome(
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = None
+                    try:
+                        if double_doubler_pid and defense.is_on_court(double_doubler_pid):
+                            stealer_pid = double_doubler_pid
+                    except Exception:
+                        stealer_pid = None
+                    if not stealer_pid:
+                        stealer_pid = choose_stealer_pid(rng, defense)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -1271,12 +1510,12 @@ def resolve_outcome(
             try:
                 if outcome == "TO_BAD_PASS":
                     base_steal = float(pm.get("steal_bad_pass_base", 0.60))
-                    steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10
+                    steal_logit_delta = (-float(q_score)) * 0.40 + (d_press - 0.5) * 1.10 + (0.18 * float(help_level)) + (0.22 * float(double_strength))
                     lineout_base = float(pm.get("bad_pass_lineout_base", 0.30))
                     p_lineout = clamp(lineout_base + max(0.0, -float(q_score)) * 0.06, 0.05, 0.55)
                 else:  # TO_HANDLE_LOSS
                     base_steal = float(pm.get("steal_handle_loss_base", 0.72))
-                    steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00
+                    steal_logit_delta = (-float(q_score)) * 0.35 + (d_press - 0.5) * 1.00 + (0.18 * float(help_level)) + (0.22 * float(double_strength))
                     p_lineout = clamp(0.06 + max(0.0, -float(q_score)) * 0.04, 0.02, 0.25)
 
                 steal_var = _team_variance_mult(defense, game_cfg) * float(ctx.get("variance_mult", 1.0))
@@ -1292,7 +1531,14 @@ def resolve_outcome(
                 )
 
                 if rng.random() < p_steal:
-                    stealer_pid = choose_stealer_pid(rng, defense)
+                    stealer_pid = None
+                    try:
+                        if double_doubler_pid and defense.is_on_court(double_doubler_pid):
+                            stealer_pid = double_doubler_pid
+                    except Exception:
+                        stealer_pid = None
+                    if not stealer_pid:
+                        stealer_pid = choose_stealer_pid(rng, defense)
                     if stealer_pid:
                         defense.add_player_stat(stealer_pid, "STL", 1)
                     payload.update({"steal": True, "stealer_pid": stealer_pid, "pos_start_next_override": "after_steal"})
@@ -1438,7 +1684,12 @@ def resolve_outcome(
                 def_score,
                 kind=kind,
                 variance_mult=variance_mult,
-                logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta),
+                logit_delta=float(tags.get('role_logit_delta', 0.0)) + float(carry_in) + float(q_delta) + (
+                    (-0.10 * float(help_level)) if kind == "shot_rim" else
+                    (-0.08 * float(help_level)) if kind == "shot_post" else
+                    (-0.03 * float(help_level)) if kind == "shot_mid" else
+                    (0.09 * float(help_level))
+                ) + ((-0.22 * float(double_strength)) if float(double_strength) > 1e-9 else 0.0),
                 fatigue_logit_delta=fatigue_logit_delta,
                 game_cfg=game_cfg,
             )
