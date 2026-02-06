@@ -11,6 +11,9 @@ Goals (v1):
   - Honor basic instructions from defense.tactics.context:
       * MATCHUP_LOCKS: force (def_pid -> off_pid) assignments.
       * MATCHUP_HIDE_PIDS: discourage assigning those defenders to high-threat offensive players.
+      * MATCHUP_ASSIGNMENTS: defender-first preferences (def_pid -> {primary_off_pid, secondary_off_role}).
+      * MATCHUP_LOCKDOWN: single hard lock (def_pid -> off_pid/off_role/tag).
+  - Honor temporary locks passed through ctx (ctx["matchups_temp_locks"]).
   - Provide a helper to fetch the primary defender for a given offensive pid.
 
 Important contracts:
@@ -57,18 +60,57 @@ def build_matchups(
     off_pids = [str(p.pid) for p in off_players]
     def_pids = [str(p.pid) for p in def_players]
 
-    # Extract defensive instructions (LOCK/HIDE) – keep JSON-friendly.
-    locks_raw = _extract_locks(defense)
+    off_set = set(off_pids)
+    def_set = set(def_pids)
+
+    # Extract defensive instructions (LOCK/HIDE/ASSIGN/LOCKDOWN) – keep JSON-friendly.
     hides_raw = _extract_hides(defense)
 
-    # Normalize / filter instructions to on-court only.
-    locks = _normalize_locks(locks_raw, off_pids, def_pids)
-    hides = [pid for pid in hides_raw if pid in set(def_pids)]
+    # Temporary locks (ctx-driven) are used for one-off, possession-scoped directives.
+    # Example: a "DENY" response can pre-switch to an alternate defender.
+    temp_locks_raw = _extract_temp_locks(ctx)
+
+    # Optional single lockdown instruction.
+    lockdown_spec = _extract_lockdown(defense)
+
+    # Defender-first matchup preferences.
+    assignments_raw = _extract_assignments(defense)
+
+    # Normalize / filter hides to on-court only.
+    hides = [pid for pid in hides_raw if pid in def_set]
 
     # Precompute threat + buckets.
     threat = {str(p.pid): _threat_score(p) for p in off_players}
     off_bucket = {str(p.pid): _bucket_offense_player(p) for p in off_players}
     def_bucket = {str(p.pid): _bucket_defense_player(p) for p in def_players}
+
+    # Resolve defender-first assignment targets to on-court OFF pids.
+    assignment_target: Dict[str, str] = {}
+    if isinstance(assignments_raw, Mapping):
+        for dpid, spec in assignments_raw.items():
+            d = str(dpid or "").strip()
+            if not d or d not in def_set:
+                continue
+            if not isinstance(spec, Mapping):
+                continue
+            target = _resolve_assignment_target(offense, spec, off_set)
+            if target:
+                assignment_target[d] = str(target)
+
+    # Merge locks with precedence:
+    #   1) ctx.matchups_temp_locks (highest)
+    #   2) defense MATCHUP_LOCKDOWN
+    #   3) defense MATCHUP_LOCKS / MATCHUP_LOCK
+    locks_explicit = _extract_locks(defense)
+    lockdown_lock = _resolve_lockdown_lock(lockdown_spec, offense, off_players, off_pids, def_pids, threat)
+    locks_merged: List[Mapping[str, Any]] = []
+    locks_merged.extend(temp_locks_raw)
+    if isinstance(lockdown_lock, Mapping) and lockdown_lock.get("def_pid") and lockdown_lock.get("off_pid"):
+        locks_merged.append(lockdown_lock)
+    locks_merged.extend(locks_explicit)
+
+    # Normalize / filter locks to on-court only.
+    locks = _normalize_locks(locks_merged, off_pids, def_pids)
 
     # Fixed assignments from locks (after normalization).
     fixed_off: set[str] = set()
@@ -120,6 +162,12 @@ def build_matchups(
         if def_pid in hides:
             score -= 25.0 * t_norm
 
+        # Assignment bonus: defender-first preference (on-court only).
+        # This is a *preference*, not a hard constraint; it should not dominate LOCKs.
+        # Tuned to be meaningful while still allowing the optimizer to solve conflicts.
+        if assignment_target.get(def_pid) == off_pid:
+            score += 18.0 + 22.0 * t_norm
+
         return float(score)
 
     fixed_score = sum(_pair_score(opid, dpid) for opid, dpid in fixed_pairs)
@@ -159,6 +207,21 @@ def build_matchups(
         "score": float(best_score if best_score != float("-inf") else fixed_score),
         "locks": [{"def_pid": str(x.get("def_pid")), "off_pid": str(x.get("off_pid"))} for x in locks],
         "hides": [str(pid) for pid in hides],
+        "temp_locks": [
+            {"def_pid": str(x.get("def_pid") or ""), "off_pid": str(x.get("off_pid") or "")}
+            for x in temp_locks_raw
+            if isinstance(x, Mapping)
+        ],
+        "lockdown": {
+            "def_pid": str(lockdown_lock.get("def_pid") or ""),
+            "off_pid": str(lockdown_lock.get("off_pid") or ""),
+        }
+        if isinstance(lockdown_lock, Mapping) and lockdown_lock.get("def_pid") and lockdown_lock.get("off_pid")
+        else None,
+        "assignments": [
+            {"def_pid": str(dpid), "off_pid": str(opid)}
+            for dpid, opid in sorted(assignment_target.items(), key=lambda kv: (str(kv[0]), str(kv[1])))
+        ],
     }
     return matchups_map, matchups_rev, meta
 
@@ -278,6 +341,201 @@ def _extract_hides(defense: TeamState) -> List[str]:
 
     s = str(raw or "").strip()
     return [s] if s else []
+
+def _extract_assignments(defense: TeamState) -> Mapping[str, Mapping[str, Any]]:
+    """Extract MATCHUP_ASSIGNMENTS from defense.tactics.context.
+
+    Expected shape:
+      MATCHUP_ASSIGNMENTS = {
+        def_pid: {"primary_off_pid": "...", "secondary_off_role": "..."},
+        ...
+      }
+
+    Notes:
+      - We allow simple aliases (off_pid/off_role) to reduce friction.
+      - Resolution to on-court pids is handled in build_matchups.
+    """
+    c = _tactics_context(defense)
+    raw = c.get("MATCHUP_ASSIGNMENTS")
+    if not isinstance(raw, Mapping):
+        return {}
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for dpid, spec in raw.items():
+        d = str(dpid or "").strip()
+        if not d or not isinstance(spec, Mapping):
+            continue
+
+        primary = str(spec.get("primary_off_pid") or spec.get("off_pid") or "").strip()
+        secondary = str(spec.get("secondary_off_role") or spec.get("off_role") or "").strip()
+        if not primary and not secondary:
+            continue
+
+        out[d] = {"primary_off_pid": primary, "secondary_off_role": secondary}
+
+    return out
+
+
+def _resolve_assignment_target(offense: TeamState, spec: Mapping[str, Any], off_set: set[str]) -> Optional[str]:
+    """Resolve a single defender assignment spec to an on-court offensive pid."""
+    primary = str(spec.get("primary_off_pid") or spec.get("off_pid") or "").strip()
+    if primary and primary in off_set:
+        return primary
+
+    role = str(spec.get("secondary_off_role") or spec.get("off_role") or "").strip()
+    if role:
+        try:
+            roles = getattr(offense, "roles", None)
+            if isinstance(roles, Mapping):
+                pid = str(roles.get(role) or "").strip()
+                if pid and pid in off_set:
+                    return pid
+        except Exception:
+            return None
+
+    return None
+
+
+def _extract_lockdown(defense: TeamState) -> Mapping[str, Any]:
+    """Extract MATCHUP_LOCKDOWN from defense.tactics.context.
+
+    Accepted shapes:
+      - {"def_pid": "dp..", "target": {"off_pid": "op.."}}
+      - {"def_pid": "dp..", "target": {"off_role": "..."}}
+      - {"def_pid": "dp..", "target": {"tag": "BEST_THREAT"}}
+      - or the same keys at the top-level (without nested "target").
+    """
+    c = _tactics_context(defense)
+    raw = c.get("MATCHUP_LOCKDOWN")
+    if not isinstance(raw, Mapping):
+        return {}
+
+    dpid = str(raw.get("def_pid") or "").strip()
+    if not dpid:
+        return {}
+
+    target: Mapping[str, Any] = raw
+    t = raw.get("target")
+    if isinstance(t, Mapping):
+        target = t
+
+    off_pid = str(target.get("off_pid") or "").strip()
+    off_role = str(target.get("off_role") or "").strip()
+    tag = str(target.get("tag") or "").strip().upper()
+
+    out: Dict[str, Any] = {"def_pid": dpid}
+    if off_pid:
+        out["off_pid"] = off_pid
+    if off_role:
+        out["off_role"] = off_role
+    if tag:
+        out["tag"] = tag
+    return out
+
+
+def _resolve_lockdown_lock(
+    lockdown_spec: Mapping[str, Any],
+    offense: TeamState,
+    off_players: Sequence[Player],
+    off_pids: Sequence[str],
+    def_pids: Sequence[str],
+    threat: Mapping[str, float],
+) -> Optional[Dict[str, str]]:
+    """Resolve a MATCHUP_LOCKDOWN spec to a concrete {def_pid, off_pid} lock (on-court only)."""
+    if not isinstance(lockdown_spec, Mapping) or not lockdown_spec:
+        return None
+
+    dpid = str(lockdown_spec.get("def_pid") or "").strip()
+    if not dpid or dpid not in set(str(x) for x in def_pids):
+        return None
+
+    off_set = set(str(x) for x in off_pids)
+
+    # 1) explicit off_pid
+    opid = str(lockdown_spec.get("off_pid") or "").strip()
+    if opid and opid in off_set:
+        return {"def_pid": dpid, "off_pid": opid}
+
+    # 2) role -> pid (if on-court)
+    off_role = str(lockdown_spec.get("off_role") or "").strip()
+    if off_role:
+        try:
+            roles = getattr(offense, "roles", None)
+            if isinstance(roles, Mapping):
+                pid = str(roles.get(off_role) or "").strip()
+                if pid and pid in off_set:
+                    return {"def_pid": dpid, "off_pid": pid}
+        except Exception:
+            pass
+
+    # 3) tag-based (currently only BEST_THREAT)
+    tag = str(lockdown_spec.get("tag") or "").strip().upper()
+    if tag == "BEST_THREAT":
+        best_pid = None
+        best_val = float("-inf")
+        for p in off_players:
+            pid = str(getattr(p, "pid", "") or "")
+            if pid not in off_set:
+                continue
+            val = float(threat.get(pid, 50.0))
+            if val > best_val + 1e-9:
+                best_val = val
+                best_pid = pid
+        if best_pid:
+            return {"def_pid": dpid, "off_pid": str(best_pid)}
+
+    return None
+
+
+def _extract_temp_locks(ctx: Mapping[str, Any]) -> List[Dict[str, str]]:
+    """Extract temporary locks from ctx.
+
+    Expected shape (ctx):
+      matchups_temp_locks = [{"def_pid": "...", "off_pid": "...", ...}, ...]
+
+    Notes:
+      - This is a low-level hook intended for possession-scoped directives.
+      - Only def_pid/off_pid are used; other keys are ignored.
+    """
+    raw = None
+    try:
+        raw = ctx.get("matchups_temp_locks")
+    except Exception:
+        raw = None
+
+    if raw is None:
+        return []
+
+    out: List[Dict[str, str]] = []
+
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, Mapping):
+                continue
+            dpid = str(item.get("def_pid") or "").strip()
+            opid = str(item.get("off_pid") or "").strip()
+            if dpid and opid:
+                out.append({"def_pid": dpid, "off_pid": opid})
+        return out
+
+    if isinstance(raw, Mapping):
+        # Case 1: explicit pair dict
+        if "def_pid" in raw and "off_pid" in raw:
+            dpid = str(raw.get("def_pid") or "").strip()
+            opid = str(raw.get("off_pid") or "").strip()
+            if dpid and opid:
+                return [{"def_pid": dpid, "off_pid": opid}]
+            return []
+
+        # Case 2: mapping def_pid -> off_pid
+        for dpid, opid in raw.items():
+            d = str(dpid or "").strip()
+            o = str(opid or "").strip()
+            if d and o:
+                out.append({"def_pid": d, "off_pid": o})
+        return out
+
+    return []
 
 
 def _normalize_locks(locks: Sequence[Mapping[str, Any]], off_pids: Sequence[str], def_pids: Sequence[str]) -> List[Dict[str, str]]:
