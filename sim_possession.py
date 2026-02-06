@@ -8,7 +8,7 @@ NOTE: Split from sim.py on 2025-12-27.
 import random
 import math
 import warnings
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from .builders import (
     build_offense_action_probs,
@@ -570,6 +570,13 @@ def simulate_possession(
         # Allow exactly one MATCHUP_SET per possession.
         # Continuation calls (e.g. no-shot foul restart) should not re-emit the initial 5v5 map.
         ctx.pop("_matchup_set_emitted", None)
+        # Clear possession-scoped tactical controls so they never leak across possessions.
+        ctx.pop("_hunt_plan_applied", None)
+        ctx.pop("hunt_action_mult_by_base", None)
+        ctx.pop("double_active", None)
+        ctx.pop("matchups_temp_locks", None)
+        ctx.pop("team_help_level", None)
+        ctx.pop("help_level_by_pid", None)
     else:
         before_pts = int(ctx.get("_pos_before_pts", int(offense.pts)))
 
@@ -673,6 +680,120 @@ def simulate_possession(
     # --- Matchups (Plan-1 MVP) ---
     # Build and maintain a 5v5 OFF_PID -> DEF_PID matchup map for the current on-court units.
     # This mapping is used by resolve.py to pick a primary defender and blend defensive values.
+    def _matchups_instr_signature() -> str:
+        """Build a stable signature for matchup-affecting tactical directives.
+
+        This is intentionally narrow (matchup-related keys only), so we don't
+        accidentally thrash the 5v5 map cache on unrelated context changes.
+        """
+        def _tctx(team: TeamState) -> Dict[str, Any]:
+            try:
+                c = getattr(getattr(team, "tactics", None), "context", None)
+            except Exception:
+                c = None
+            return c if isinstance(c, dict) else {}
+
+        dctx = _tctx(defense)
+
+        # --- LOCKS ---
+        locks_pairs: List[Tuple[str, str]] = []
+        raw_locks = dctx.get("MATCHUP_LOCKS", dctx.get("MATCHUP_LOCK"))
+        if isinstance(raw_locks, list):
+            for item in raw_locks:
+                if not isinstance(item, dict):
+                    continue
+                dp = str(item.get("def_pid") or "").strip()
+                op = str(item.get("off_pid") or "").strip()
+                if dp and op:
+                    locks_pairs.append((dp, op))
+        elif isinstance(raw_locks, dict):
+            if "def_pid" in raw_locks and "off_pid" in raw_locks:
+                dp = str(raw_locks.get("def_pid") or "").strip()
+                op = str(raw_locks.get("off_pid") or "").strip()
+                if dp and op:
+                    locks_pairs.append((dp, op))
+            else:
+                for dp, op in raw_locks.items():
+                    dps = str(dp or "").strip()
+                    ops = str(op or "").strip()
+                    if dps and ops:
+                        locks_pairs.append((dps, ops))
+        locks_pairs.sort()
+
+        # --- HIDES ---
+        hides: List[str] = []
+        raw_hides = dctx.get("MATCHUP_HIDE_PIDS", dctx.get("MATCHUP_HIDE_PID"))
+        if isinstance(raw_hides, list):
+            hides = [str(x).strip() for x in raw_hides if str(x).strip()]
+        else:
+            s = str(raw_hides or "").strip()
+            hides = [s] if s else []
+        hides = sorted(set(hides))
+
+        # --- ASSIGNMENTS ---
+        assigns: List[Tuple[str, str, str]] = []
+        raw_assign = dctx.get("MATCHUP_ASSIGNMENTS")
+        if isinstance(raw_assign, dict):
+            for dp, spec in raw_assign.items():
+                dps = str(dp or "").strip()
+                if not dps or not isinstance(spec, dict):
+                    continue
+                primary = str(spec.get("primary_off_pid") or spec.get("off_pid") or "").strip()
+                secondary = str(spec.get("secondary_off_role") or spec.get("off_role") or "").strip()
+                assigns.append((dps, primary, secondary))
+        assigns.sort()
+
+        # --- LOCKDOWN ---
+        lockdown = dctx.get("MATCHUP_LOCKDOWN")
+        l_def = ""; l_off = ""; l_role = ""; l_tag = ""
+        if isinstance(lockdown, dict):
+            l_def = str(lockdown.get("def_pid") or "").strip()
+            tgt = lockdown.get("target")
+            if isinstance(tgt, dict):
+                l_off = str(tgt.get("off_pid") or "").strip()
+                l_role = str(tgt.get("off_role") or "").strip()
+                l_tag = str(tgt.get("tag") or "").strip().upper()
+            else:
+                l_off = str(lockdown.get("off_pid") or "").strip()
+                l_role = str(lockdown.get("off_role") or "").strip()
+                l_tag = str(lockdown.get("tag") or "").strip().upper()
+
+        # --- TEMP LOCKS (ctx) ---
+        temp_pairs: List[Tuple[str, str]] = []
+        raw_temp = ctx.get("matchups_temp_locks")
+        if isinstance(raw_temp, list):
+            for item in raw_temp:
+                if not isinstance(item, dict):
+                    continue
+                dp = str(item.get("def_pid") or "").strip()
+                op = str(item.get("off_pid") or "").strip()
+                if dp and op:
+                    temp_pairs.append((dp, op))
+        elif isinstance(raw_temp, dict):
+            if "def_pid" in raw_temp and "off_pid" in raw_temp:
+                dp = str(raw_temp.get("def_pid") or "").strip()
+                op = str(raw_temp.get("off_pid") or "").strip()
+                if dp and op:
+                    temp_pairs.append((dp, op))
+            else:
+                for dp, op in raw_temp.items():
+                    dps = str(dp or "").strip()
+                    ops = str(op or "").strip()
+                    if dps and ops:
+                        temp_pairs.append((dps, ops))
+        temp_pairs.sort()
+
+        # Keep signature compact and stable.
+        return "|".join(
+            [
+                "L=" + ",".join([f"{a}>{b}" for a, b in locks_pairs]),
+                "H=" + ",".join(hides),
+                "A=" + ",".join([f"{d}:{p}:{r}" for d, p, r in assigns]),
+                "LD=" + ":".join([l_def, l_off, l_role, l_tag]),
+                "T=" + ",".join([f"{a}>{b}" for a, b in temp_pairs]),
+            ]
+        )
+
     def _ensure_matchups(reason: str = "pos_start") -> None:
         try:
             new_off = list(getattr(offense, "on_court_pids", []) or [])
@@ -690,10 +811,15 @@ def simulate_possession(
             def_order = [str(x) for x in new_def if str(x)]
             snap_off = sorted(off_order)
             snap_def = sorted(def_order)
+            instr_sig = _matchups_instr_signature()
 
             # No-op if lineup snapshot is unchanged.
             if isinstance(ctx.get("matchups_map"), dict):
-                if ctx.get("matchups_off_on_court") == snap_off and ctx.get("matchups_def_on_court") == snap_def:
+                if (
+                    ctx.get("matchups_off_on_court") == snap_off
+                    and ctx.get("matchups_def_on_court") == snap_def
+                    and ctx.get("matchups_instr_sig") == instr_sig
+                ):
                     # Even if the 5v5 map is unchanged, we still want one MATCHUP_SET at possession start
                     # for replay / text commentary.
                     if reason == "pos_start" and not bool(ctx.get("_matchup_set_emitted", False)):
@@ -736,6 +862,7 @@ def simulate_possession(
             ctx["matchups_version"] = int(ctx.get("matchups_version", 0) or 0) + 1
             ctx["matchups_off_on_court"] = snap_off
             ctx["matchups_def_on_court"] = snap_def
+            ctx["matchups_instr_sig"] = instr_sig
             ctx["matchups_map"] = m_map
             ctx["matchups_rev"] = m_rev
             ctx["matchups_meta"] = m_meta
@@ -834,8 +961,360 @@ def simulate_possession(
         except Exception as exc:
             _record_ctx_error("matchups.force_inject", exc)
 
+    # --- Help defense (possession-scoped) ---
+    def _cache_help_levels() -> None:
+        """Cache per-defender help levels + a small team help scalar in ctx.
+
+        Input (defense.tactics.context):
+          HELP_LEVEL_BY_PID: {pid: "WEAK"/"NORMAL"/"STRONG"} or {pid: -1/0/+1}
+        Output (ctx):
+          help_level_by_pid: {pid: -1/0/+1}
+          team_help_level: float in [-1, +1]
+        """
+        try:
+            dctx = getattr(getattr(defense, "tactics", None), "context", None)
+        except Exception:
+            dctx = None
+        raw = dctx.get("HELP_LEVEL_BY_PID") if isinstance(dctx, dict) else None
+
+        lvl: Dict[str, float] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                pid = str(k or "").strip()
+                if not pid:
+                    continue
+                if isinstance(v, (int, float)):
+                    vv = float(v)
+                else:
+                    s = str(v or "").strip().upper()
+                    if s in ("STRONG", "HIGH", "AGGRESSIVE", "+1"):
+                        vv = 1.0
+                    elif s in ("WEAK", "LOW", "CONSERVATIVE", "-1"):
+                        vv = -1.0
+                    else:
+                        vv = 0.0
+                lvl[pid] = clamp(vv, -1.0, 1.0)
+
+        # Weighted team scalar: defenders with higher DEF_HELP matter a bit more.
+        on_def = defense.on_court_players()
+        if not on_def:
+            ctx["help_level_by_pid"] = lvl
+            ctx["team_help_level"] = 0.0
+            return
+
+        num = 0.0
+        den = 0.0
+        for p in on_def:
+            pid = str(getattr(p, "pid", "") or "").strip()
+            if not pid:
+                continue
+            w = 0.5 + (_player_stat(p, "DEF_HELP", 50.0) / 100.0)
+            num += w * float(lvl.get(pid, 0.0))
+            den += w
+        team_h = (num / den) if den > 0 else 0.0
+        ctx["help_level_by_pid"] = lvl
+        ctx["team_help_level"] = clamp(team_h, -1.0, 1.0)
+
+    # --- Hunting plans (possession start) ---
+    def _choose_def_by_tag(tag: str, *, exclude: Optional[set] = None) -> Optional[str]:
+        exclude = exclude or set()
+        t = str(tag or "").strip().upper()
+        best_pid = None
+        best_val = None
+        for p in defense.on_court_players():
+            pid = str(getattr(p, "pid", "") or "").strip()
+            if not pid or pid in exclude:
+                continue
+            if t == "WEAKEST_POA":
+                val = -_player_stat(p, "DEF_POA", 50.0)
+            elif t == "WEAKEST_OVERALL":
+                # Lower is weaker.
+                val = -(0.70 * _player_stat(p, "DEF_POA", 50.0) + 0.30 * _player_stat(p, "PHYSICAL", 50.0))
+            elif t == "BEST_POA":
+                val = _player_stat(p, "DEF_POA", 50.0)
+            elif t == "BEST_POST":
+                val = _player_stat(p, "DEF_POST", 50.0)
+            elif t == "BEST_STEAL":
+                val = _player_stat(p, "DEF_STEAL", 50.0)
+            elif t == "BEST_HELP":
+                val = _player_stat(p, "DEF_HELP", 50.0)
+            else:
+                # Default: best POA.
+                val = _player_stat(p, "DEF_POA", 50.0)
+            if best_pid is None or float(val) > float(best_val):
+                best_pid = pid
+                best_val = val
+        return best_pid
+
+    def _resolve_actor_pid(plan: Mapping[str, Any]) -> Optional[str]:
+        opid = str(plan.get("actor_pid") or "").strip()
+        if opid and offense.is_on_court(opid):
+            return opid
+        role = str(plan.get("actor_role") or "").strip()
+        if role:
+            try:
+                roles = getattr(offense, "roles", None)
+                if isinstance(roles, dict):
+                    pid = str(roles.get(role) or "").strip()
+                    if pid and offense.is_on_court(pid):
+                        return pid
+            except Exception:
+                return None
+        return None
+
+    def _resolve_target_def_pid(plan: Mapping[str, Any]) -> Optional[str]:
+        dpid = str(plan.get("target_def_pid") or "").strip()
+        if dpid and defense.is_on_court(dpid):
+            return dpid
+
+        tag = str(plan.get("target_def_tag") or "").strip().upper()
+        if tag == "HIDE":
+            try:
+                dctx = getattr(getattr(defense, "tactics", None), "context", None)
+            except Exception:
+                dctx = None
+            hides = []
+            if isinstance(dctx, dict):
+                raw = dctx.get("MATCHUP_HIDE_PIDS", dctx.get("MATCHUP_HIDE_PID"))
+                if isinstance(raw, list):
+                    hides = [str(x).strip() for x in raw if str(x).strip()]
+                else:
+                    s = str(raw or "").strip()
+                    hides = [s] if s else []
+            hides = [h for h in hides if h and defense.is_on_court(h)]
+            if hides:
+                # Pick the weakest POA among hidden candidates (stable).
+                cand = None
+                cand_val = None
+                for hp in hides:
+                    try:
+                        p = defense.get_player(hp)
+                    except Exception:
+                        p = None
+                    v = _player_stat(p, "DEF_POA", 50.0) if p is not None else 50.0
+                    if cand is None or float(v) < float(cand_val):
+                        cand = hp
+                        cand_val = v
+                if cand:
+                    return cand
+            return None
+
+        if tag:
+            return _choose_def_by_tag(tag)
+        return None
+
+    def _hunt_response_mode(target_def_pid: str) -> Tuple[str, Dict[str, Any]]:
+        """Return (mode, response_ctx) where mode is ALLOW/DENY/TRAP."""
+        try:
+            dctx = getattr(getattr(defense, "tactics", None), "context", None)
+        except Exception:
+            dctx = None
+        raw = dctx.get("HUNT_RESPONSE") if isinstance(dctx, dict) else None
+        if not isinstance(raw, dict):
+            return "ALLOW", {}
+
+        # Determine if target is a hidden defender or the lockdown defender.
+        hides = set()
+        try:
+            raw_h = dctx.get("MATCHUP_HIDE_PIDS", dctx.get("MATCHUP_HIDE_PID"))
+        except Exception:
+            raw_h = None
+        if isinstance(raw_h, list):
+            hides = set(str(x).strip() for x in raw_h if str(x).strip())
+        else:
+            s = str(raw_h or "").strip()
+            hides = {s} if s else set()
+
+        lockdown_def = None
+        try:
+            ld = dctx.get("MATCHUP_LOCKDOWN")
+        except Exception:
+            ld = None
+        if isinstance(ld, dict):
+            lockdown_def = str(ld.get("def_pid") or "").strip() or None
+
+        if target_def_pid and target_def_pid in hides:
+            mode = str(raw.get("vs_hide", raw.get("default", "ALLOW")) or "ALLOW").strip().upper()
+        elif lockdown_def and target_def_pid == lockdown_def:
+            mode = str(raw.get("vs_lockdown", raw.get("default", "ALLOW")) or "ALLOW").strip().upper()
+        else:
+            mode = str(raw.get("default", "ALLOW") or "ALLOW").strip().upper()
+
+        # Normalize mode.
+        if mode not in ("ALLOW", "DENY", "TRAP"):
+            mode = "ALLOW"
+        return mode, dict(raw)
+
+    def _maybe_apply_hunt_plan() -> None:
+        """Apply an offensive hunt plan at possession start (one plan per possession)."""
+        if is_continuation:
+            return
+        if bool(ctx.get("_hunt_plan_applied", False)):
+            return
+
+        try:
+            octx = getattr(getattr(offense, "tactics", None), "context", None)
+        except Exception:
+            octx = None
+        plans = octx.get("HUNT_PLANS") if isinstance(octx, dict) else None
+        if not isinstance(plans, list) or not plans:
+            return
+
+        # Choose first plan that passes its frequency roll and has valid actor/target.
+        for plan in plans:
+            if not isinstance(plan, dict):
+                continue
+            try:
+                freq = float(plan.get("frequency", 1.0))
+            except Exception:
+                freq = 1.0
+            freq = clamp(freq, 0.0, 1.0)
+            if freq <= 0.0:
+                continue
+            if freq < 1.0 and rng.random() > freq:
+                continue
+
+            actor_pid = _resolve_actor_pid(plan)
+            if not actor_pid:
+                continue
+            target_def_pid = _resolve_target_def_pid(plan)
+            if not target_def_pid:
+                continue
+
+            label = str(plan.get("label") or "").strip() or None
+
+            # Action multipliers (base-action keyed) for this possession.
+            mult_by_base: Dict[str, float] = {}
+            raw_mult = plan.get("action_mult_by_base")
+            if isinstance(raw_mult, dict):
+                for k, v in raw_mult.items():
+                    kk = str(k or "").strip()
+                    if not kk:
+                        continue
+                    try:
+                        vv = float(v)
+                    except Exception:
+                        continue
+                    if vv <= 0:
+                        continue
+                    mult_by_base[kk] = clamp(vv, 0.25, 2.50)
+
+            force_actor = bool(plan.get("force_actor", True))
+            force_matchup = bool(plan.get("force_matchup", True))
+
+            # Emit intent first (text-replay can narrate "A targets B").
+            try:
+                emit_event(
+                    game_state,
+                    event_type="HUNT_CALL",
+                    home=home_team,
+                    away=away_team,
+                    rules=rules,
+                    team_id=off_team_id,
+                    opp_team_id=def_team_id,
+                    pos_start=str(pos_origin),
+                    label=label,
+                    off_pid=actor_pid,
+                    target_def_pid=target_def_pid,
+                    action_mult_by_base=dict(mult_by_base),
+                )
+            except Exception:
+                pass
+
+            mode, resp_cfg = _hunt_response_mode(target_def_pid)
+
+            alt_def_pid = None
+            doubler_pid = None
+            trap_strength = None
+
+            if mode == "DENY":
+                # Choose an alternate defender to pre-switch onto the hunt actor.
+                deny_tag = str(resp_cfg.get("deny_alt_def_tag", "BEST_POA") or "BEST_POA").strip().upper()
+                # If actor is physical, prefer BEST_POST even when deny_tag is BEST_POA.
+                try:
+                    actor_obj = offense.get_player(actor_pid)
+                except Exception:
+                    actor_obj = None
+                actor_phys = _player_stat(actor_obj, "PHYSICAL", 50.0) if actor_obj is not None else 50.0
+                if deny_tag == "BEST_POA" and actor_phys >= 60.0:
+                    deny_tag_eff = "BEST_POST"
+                else:
+                    deny_tag_eff = deny_tag
+                alt_def_pid = _choose_def_by_tag(deny_tag_eff, exclude={target_def_pid})
+                if alt_def_pid:
+                    ctx["matchups_temp_locks"] = [{"off_pid": actor_pid, "def_pid": alt_def_pid, "event": "HUNT_DENY"}]
+                    # Rebuild matchups immediately so the denial is reflected in ctx.matchups_map.
+                    _ensure_matchups(reason="hunt_deny")
+                else:
+                    # If we cannot deny (no alternate), fall back to allowing the hunt.
+                    mode = "ALLOW"
+
+            if mode == "TRAP":
+                try:
+                    trap_strength = float(resp_cfg.get("trap_strength", 0.65))
+                except Exception:
+                    trap_strength = 0.65
+                trap_strength = clamp(trap_strength, 0.0, 1.0)
+                trap_dpid = str(resp_cfg.get("trap_doubler_pid") or "").strip()
+                if trap_dpid and defense.is_on_court(trap_dpid):
+                    doubler_pid = trap_dpid
+                else:
+                    tag = str(resp_cfg.get("trap_doubler_tag", "BEST_STEAL") or "BEST_STEAL").strip().upper()
+                    doubler_pid = _choose_def_by_tag(tag, exclude={target_def_pid})
+                if doubler_pid:
+                    ctx["double_active"] = {
+                        "off_pid": actor_pid,
+                        "primary_def_pid": target_def_pid,
+                        "doubler_pid": doubler_pid,
+                        "strength": float(trap_strength),
+                        "ttl": 2,
+                        "source": "HUNT_TRAP",
+                    }
+
+            # Apply offensive intent (still meaningful even if DENY pre-switches).
+            if mult_by_base:
+                ctx["hunt_action_mult_by_base"] = dict(mult_by_base)
+            if force_actor:
+                ctx["force_actor_pid"] = actor_pid
+
+            if force_matchup and mode in ("ALLOW", "TRAP"):
+                ctx["matchup_force"] = {
+                    "off_pid": actor_pid,
+                    "def_pid": target_def_pid,
+                    "event": "HUNT",
+                    "reason": label,
+                    "ttl": 1,
+                }
+
+            # Emit defensive response (text can narrate deny/trap).
+            try:
+                emit_event(
+                    game_state,
+                    event_type="HUNT_RESPONSE",
+                    home=home_team,
+                    away=away_team,
+                    rules=rules,
+                    team_id=def_team_id,
+                    opp_team_id=off_team_id,
+                    pos_start=str(pos_origin),
+                    response=mode,
+                    label=label,
+                    off_pid=actor_pid,
+                    target_def_pid=target_def_pid,
+                    alt_def_pid=alt_def_pid,
+                    doubler_pid=doubler_pid,
+                    strength=(float(trap_strength) if trap_strength is not None else None),
+                )
+            except Exception:
+                pass
+
+            ctx["_hunt_plan_applied"] = True
+            return
+
     # Build initial matchup map for this possession/segment.
     _ensure_matchups(reason="pos_start")
+    _cache_help_levels()
+    _maybe_apply_hunt_plan()
 
     def _apply_contextual_action_weights(probs: Dict[str, float]) -> Dict[str, float]:
         """Soft-bias action weights by possession context (no per-team fixed style)."""
@@ -843,30 +1322,44 @@ def simulate_possession(
             return probs
         if bool(ctx.get("dead_ball_inbound", False)):
             return probs
-        pstart = str(ctx.get("pos_start", pos_start))
-        if pstart not in ("after_drb", "after_tov", "after_steal", "after_block"):
-            return probs
-        mult_tbl = rules.get("transition_weight_mult", {}) or {}
-        try:
-            mult = float(mult_tbl.get(pstart, mult_tbl.get("default", 1.0)))
-        except Exception:
-            mult = 1.0
-        if mult <= 1.0:
-            return probs
-
         out = dict(probs)
         changed = False
-        for k, v in list(out.items()):
-            if get_action_base(k, game_cfg) == "TransitionEarly":
-                out[k] = float(v) * mult
-                changed = True
+
+        # Transition bias (existing behavior).
+        pstart = str(ctx.get("pos_start", pos_start))
+        if pstart in ("after_drb", "after_tov", "after_steal", "after_block"):
+            mult_tbl = rules.get("transition_weight_mult", {}) or {}
+            try:
+                mult = float(mult_tbl.get(pstart, mult_tbl.get("default", 1.0)))
+            except Exception:
+                mult = 1.0
+            if mult > 1.0:
+                for k, v in list(out.items()):
+                    if get_action_base(k, game_cfg) == "TransitionEarly":
+                        out[k] = float(v) * mult
+                        changed = True
+
+        # Hunt bias (base-action multipliers).
+        hunt_mult = ctx.get("hunt_action_mult_by_base")
+        if isinstance(hunt_mult, dict) and hunt_mult:
+            for k, v in list(out.items()):
+                base = get_action_base(k, game_cfg)
+                if base in hunt_mult:
+                    try:
+                        m = float(hunt_mult.get(base, 1.0))
+                    except Exception:
+                        m = 1.0
+                    if m != 1.0:
+                        out[k] = float(v) * clamp(m, 0.25, 2.50)
+                        changed = True
+
         if not changed:
             return probs
-        s = sum(out.values())
+        s = sum(float(x) for x in out.values())
         if s <= 0:
             return probs
         for k in out:
-            out[k] /= s
+            out[k] = float(out[k]) / s
         return out
 
 
@@ -983,6 +1476,51 @@ def simulate_possession(
         if not final_probs:
             return next(iter(feasible.keys()))
         return weighted_choice(rng_local, final_probs)
+
+    def _apply_help_to_priors(priors: Dict[str, float]) -> Dict[str, float]:
+        """Apply a small help-defense tradeoff to outcome priors (possession scoped).
+
+        Uses ctx['team_help_level'] in [-1, +1]:
+          +1 => strong help: more kickouts/skip/TO bad pass, fewer rim/post
+          -1 => weak help: fewer kickouts/skip/TO bad pass, more rim/post
+        """
+        if not priors:
+            return priors
+        try:
+            h = float(ctx.get("team_help_level", 0.0))
+        except Exception:
+            h = 0.0
+        h = clamp(h, -1.0, 1.0)
+        if abs(h) < 1e-9:
+            return priors
+
+        rim_mult = clamp(1.0 - 0.10 * h, 0.75, 1.25)
+        post_mult = clamp(1.0 - 0.08 * h, 0.75, 1.25)
+        c3_mult = clamp(1.0 + 0.10 * h, 0.75, 1.25)
+        kick_mult = clamp(1.0 + 0.12 * h, 0.75, 1.25)
+        badpass_mult = clamp(1.0 + 0.06 * h, 0.75, 1.25)
+
+        out = dict(priors)
+        for k, v in list(out.items()):
+            vv = float(v)
+            if k.startswith("SHOT_RIM_") or k == "SHOT_TOUCH_FLOATER":
+                vv *= rim_mult
+            elif k == "SHOT_POST":
+                vv *= post_mult
+            elif k == "SHOT_3_CS":
+                vv *= c3_mult
+            elif k in ("PASS_KICKOUT", "PASS_SKIP"):
+                vv *= kick_mult
+            elif k == "TO_BAD_PASS":
+                vv *= badpass_mult
+            out[k] = vv
+
+        s = sum(float(x) for x in out.values())
+        if s <= 0:
+            return priors
+        for k in out:
+            out[k] = float(out[k]) / s
+        return out
 
     def _apply_urgent_outcome_constraints(priors: Dict[str, float]) -> Dict[str, float]:
         # Reduce PASS/RESET chaining when time is tight.
@@ -1165,6 +1703,7 @@ def simulate_possession(
         pri = apply_team_style_to_outcome_priors(pri, team_style)
         pri = apply_role_fit_to_priors_and_tags(pri, get_action_base(action, game_cfg), offense, tags, game_cfg=game_cfg)
         pri = apply_quality_to_turnover_priors(pri, get_action_base(action, game_cfg), offense, defense, tags, ctx)
+        pri = _apply_help_to_priors(pri)
         pri = _apply_urgent_outcome_constraints(pri)
         if clock_expired or shotclock_expired:
             pri_term = {k: v for k, v in pri.items() if (not k.startswith("PASS_") and not k.startswith("RESET_"))}
