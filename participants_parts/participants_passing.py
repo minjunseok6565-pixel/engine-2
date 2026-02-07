@@ -3,7 +3,7 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .models import Player, TeamState
+from ..models import Player, TeamState
 
 from .participants_roles import (
     ROLE_INITIATOR_PRIMARY,
