@@ -40,6 +40,7 @@ def handle_pass(
     help_level = rc.help_level
     double_strength = rc.double_strength
     double_doubler_pid = rc.double_doubler_pid
+    double_source = getattr(rc, "double_source", None)
 
     pass_base = game_cfg.pass_base_success if isinstance(game_cfg.pass_base_success, Mapping) else {}
     base_s = pass_base.get(outcome, 0.90) * _knob_mult(game_cfg, "pass_base_success_mult", 1.0)
@@ -273,6 +274,20 @@ def handle_pass(
             ctx["carry_logit_delta"] = float(quality.apply_pass_carry(prev + carry_out, next_outcome="*"))
 
         ctx["_pending_pass_event"] = {"pid": actor.pid, "outcome": outcome, "base_action": base_action}
+
+        # If we successfully pass out of a double, create a one-step rotation advantage
+        # (4v3 / scramble defense) and terminate the on-ball double for the next step.
+        if float(double_strength) > 1e-9:
+            try:
+                ctx["rotation_adv"] = {
+                    "ttl": 1,
+                    "adv": float(clamp(float(double_strength), 0.0, 1.0)),
+                    "source": (str(double_source or "DOUBLE") or "DOUBLE"),
+                }
+            except Exception:
+                pass
+            ctx.pop("double_active", None)
+
         payload = {"outcome": outcome, "pass_chain": pass_chain + 1}
         if debug_q:
             payload.update(
@@ -309,4 +324,3 @@ def handle_pass(
     clear_pass_tracking(ctx)
 
     return "RESET", _with_matchup(payload)
-
