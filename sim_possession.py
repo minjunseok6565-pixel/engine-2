@@ -1087,10 +1087,7 @@ def simulate_possession(
                 cand = None
                 cand_val = None
                 for hp in hides:
-                    try:
-                        p = defense.get_player(hp)
-                    except Exception:
-                        p = None
+                    p = defense.find_player(hp)
                     v = _player_stat(p, "DEF_POA", 50.0) if p is not None else 50.0
                     if cand is None or float(v) < float(cand_val):
                         cand = hp
@@ -1231,10 +1228,7 @@ def simulate_possession(
                 # Choose an alternate defender to pre-switch onto the hunt actor.
                 deny_tag = str(resp_cfg.get("deny_alt_def_tag", "BEST_POA") or "BEST_POA").strip().upper()
                 # If actor is physical, prefer BEST_POST even when deny_tag is BEST_POA.
-                try:
-                    actor_obj = offense.get_player(actor_pid)
-                except Exception:
-                    actor_obj = None
+                actor_obj = offense.find_player(actor_pid)
                 actor_phys = _player_stat(actor_obj, "PHYSICAL", 50.0) if actor_obj is not None else 50.0
                 if deny_tag == "BEST_POA" and actor_phys >= 60.0:
                     deny_tag_eff = "BEST_POST"
