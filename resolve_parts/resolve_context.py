@@ -5,16 +5,16 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
-from .builders import get_action_base
-from .core import clamp, dot_profile
-from .defense import team_def_snapshot
-from .era import DEFAULT_PROB_MODEL
-from .models import GameState, Player, TeamState
-from .profiles import OUTCOME_PROFILES
-from .prob import _team_variance_mult
-from .def_role_players import engine_get_stat
+from ..builders import get_action_base
+from ..core import clamp, dot_profile
+from ..defense import team_def_snapshot
+from ..era import DEFAULT_PROB_MODEL
+from ..models import GameState, Player, TeamState
+from ..profiles import OUTCOME_PROFILES
+from ..prob import _team_variance_mult
+from ..def_role_players import engine_get_stat
 
-from .participants import (
+from ..participants import (
     choose_assister_weighted,  # not used here but kept for parity if needed later
     choose_creator_for_pulloff,
     choose_finisher_rim,
@@ -25,11 +25,11 @@ from .participants import (
     choose_weighted_player,
     choose_default_actor,
 )
-from . import matchups
+from .. import matchups
 from .resolve_pass_tracking import clear_pass_tracking
 
 if TYPE_CHECKING:
-    from .game_config import GameConfig
+    from ..game_config import GameConfig
 
 def is_shot(o: str) -> bool: return str(o).startswith("SHOT_")
 def is_pass(o: str) -> bool: return str(o).startswith("PASS_")
