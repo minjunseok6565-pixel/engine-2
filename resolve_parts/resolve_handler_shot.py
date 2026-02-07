@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Dict, Tuple
 
-from .builders import get_action_base
-from .core import clamp
-from .def_role_players import get_or_build_def_role_players, engine_get_stat
-from .prob import _shot_kind_from_outcome, _team_variance_mult, prob_from_scores
-from .participants import choose_assister_weighted, choose_blocker_pid
+from ..builders import get_action_base
+from ..core import clamp
+from ..def_role_players import get_or_build_def_role_players, engine_get_stat
+from ..prob import _shot_kind_from_outcome, _team_variance_mult, prob_from_scores
+from ..participants import choose_assister_weighted, choose_blocker_pid
 from . import quality
 from .resolve_context import ResolveContext, _knob_mult
 from .resolve_pass_tracking import pick_assister_from_history, clear_pass_tracking
