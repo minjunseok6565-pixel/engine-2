@@ -70,7 +70,11 @@ from .possession.team_style import (
 )
 from .possession.tactics_ctx import make_possession_tactics_ctx
 from .possession.late_clock import build_late_clock_guardrails
-from .possession.priors_bias import apply_help_to_priors
+from .possession.priors_bias import (
+    apply_help_to_priors,
+    apply_double_to_priors,
+    apply_rotation_advantage_to_priors,
+)
 
 def simulate_possession(
     rng: random.Random,
@@ -113,7 +117,10 @@ def simulate_possession(
         ctx.pop("double_active", None)
         ctx.pop("matchups_temp_locks", None)
         ctx.pop("team_help_level", None)
+        ctx.pop("team_help_delta", None)
         ctx.pop("help_level_by_pid", None)
+        ctx.pop("def_pressure", None)
+        ctx.pop("rotation_adv", None)
     else:
         before_pts = int(ctx.get("_pos_before_pts", int(offense.pts)))
 
@@ -217,7 +224,7 @@ def simulate_possession(
     # --- Matchups (Plan-1 MVP) ---
     # Build and maintain a 5v5 OFF_PID -> DEF_PID matchup map for the current on-court units.
     # This mapping is used by resolve.py to pick a primary defender and blend defensive values.
-    _ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force = make_possession_tactics_ctx(
+    _ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force, _update_def_pressure_for_step = make_possession_tactics_ctx(
         offense=offense,
         defense=defense,
         game_state=game_state,
@@ -433,6 +440,9 @@ def simulate_possession(
 
         base_action_now = get_action_base(action, game_cfg)
 
+        # Update per-step defensive pressure context (help/double) BEFORE building priors.
+        _update_def_pressure_for_step(action=action, base_action=base_action_now, tags=tags)
+
         # If time expires during a non-terminal action (pass/reset), end immediately.
         if shotclock_expired and _is_nonterminal_base(base_action_now):
             commit_shot_clock_turnover(offense)
@@ -480,6 +490,8 @@ def simulate_possession(
         pri = apply_role_fit_to_priors_and_tags(pri, get_action_base(action, game_cfg), offense, tags, game_cfg=game_cfg)
         pri = apply_quality_to_turnover_priors(pri, get_action_base(action, game_cfg), offense, defense, tags, ctx)
         pri = apply_help_to_priors(pri, ctx)
+        pri = apply_double_to_priors(pri, ctx)
+        pri = apply_rotation_advantage_to_priors(pri, ctx)
         pri = _apply_urgent_outcome_constraints(pri)
         if clock_expired or shotclock_expired:
             pri_term = {k: v for k, v in pri.items() if (not k.startswith("PASS_") and not k.startswith("RESET_"))}
