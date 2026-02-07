@@ -6,21 +6,21 @@ from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 from .models import TeamState, GameState
 
-from .resolve_ft_rebound import (
+from .resolve_parts.resolve_ft_rebound import (
     resolve_free_throws,
     rebound_orb_probability,
     choose_orb_rebounder,
     choose_drb_rebounder,
 )
-from .resolve_pass_tracking import (
+from .resolve_parts.resolve_pass_tracking import (
     clear_pass_tracking,
     commit_pending_pass_event,
 )
-from .resolve_context import build_resolve_context
-from .resolve_handler_shot import handle_shot
-from .resolve_handler_pass import handle_pass
-from .resolve_handler_turnover import handle_turnover, handle_shot_clock_turnover
-from .resolve_handler_foul import handle_foul
+from .resolve_parts.resolve_context import build_resolve_context
+from .resolve_parts.resolve_handler_shot import handle_shot
+from .resolve_parts.resolve_handler_pass import handle_pass
+from .resolve_parts.resolve_handler_turnover import handle_turnover, handle_shot_clock_turnover
+from .resolve_parts.resolve_handler_foul import handle_foul
 
 if TYPE_CHECKING:
     from .game_config import GameConfig
