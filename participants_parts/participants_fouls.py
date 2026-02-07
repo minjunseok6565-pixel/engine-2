@@ -4,8 +4,8 @@ import math
 import random
 from typing import Dict, Optional, Sequence
 
-from .core import weighted_choice
-from .models import Player, TeamState
+from ..core import weighted_choice
+from ..models import Player, TeamState
 
 from .participants_common import _clamp
 
