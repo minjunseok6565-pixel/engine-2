@@ -8,7 +8,7 @@ from ..core import clamp
 from ..def_role_players import get_or_build_def_role_players, engine_get_stat
 from ..prob import _shot_kind_from_outcome, _team_variance_mult, prob_from_scores
 from ..participants import choose_assister_weighted, choose_blocker_pid
-from . import quality
+from .. import quality
 from .resolve_context import ResolveContext, _knob_mult
 from .resolve_pass_tracking import pick_assister_from_history, clear_pass_tracking
 from .resolve_shot_chart import (
