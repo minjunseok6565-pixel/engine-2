@@ -222,11 +222,38 @@ def build_resolve_context(
         pass
 
     # Tactical context (read-only defaults): defensive help + double/trap.
+    # Help SSOT: ctx['def_pressure']['help']['eff_resolve'] (scheme baseline + team delta)
+    # Additional adjustment: helper skill increases help impact; leaving a good shooter reduces how much help can be applied safely.
+    base_help = 0.0
+    helper_pid: Optional[str] = None
+    leave_cost_norm = 0.0
     try:
-        help_level = float(ctx.get("team_help_level", 0.0) or 0.0)
+        dp = ctx.get("def_pressure") if isinstance(ctx.get("def_pressure"), dict) else {}
+        hp = dp.get("help") if isinstance(dp.get("help"), dict) else {}
+        base_help = float(hp.get("eff_resolve", 0.0) or 0.0)
+        helper_pid = str(hp.get("helper_pid") or "").strip() or None
+        leave_cost_norm = float(hp.get("leave_cost_norm", 0.0) or 0.0)
     except Exception:
-        help_level = 0.0
-    help_level = clamp(help_level, -1.0, 1.0)
+        base_help = 0.0
+        helper_pid = None
+        leave_cost_norm = 0.0
+
+    base_help = clamp(base_help, -1.0, 1.0)
+    leave_cost_norm = clamp(leave_cost_norm, -1.0, 1.0)
+
+    helper_skill_norm = 0.0
+    if helper_pid and defense.is_on_court(helper_pid):
+        try:
+            hp_player = defense.find_player(helper_pid)
+        except Exception:
+            hp_player = None
+        try:
+            h_help = float(engine_get_stat(hp_player, "DEF_HELP", 50.0)) if hp_player is not None else 50.0
+            helper_skill_norm = float(clamp((h_help - 50.0) / 50.0, -1.0, 1.0))
+        except Exception:
+            helper_skill_norm = 0.0
+
+    help_level = float(clamp(base_help + (0.20 * helper_skill_norm) - (0.25 * leave_cost_norm), -1.0, 1.0))
 
     double_strength: float = 0.0
     double_doubler_pid: Optional[str] = None
@@ -376,6 +403,7 @@ def build_resolve_context(
             strength = 0.0
         strength = clamp(strength, 0.0, 1.0)
 
+        primary_mismatch = False
         exclude = set([str(defender_pid or "").strip()]) if defender_pid else set()
         doubler = str(spec.get("doubler_pid") or "").strip()
         if doubler and (not defense.is_on_court(doubler) or doubler in exclude):
@@ -388,7 +416,20 @@ def build_resolve_context(
                 doubler = _choose_def_by_tag(tag, exclude) or ""
         doubler_pid = doubler if doubler else None
 
+        # Validate that the double spec still corresponds to the current primary defender.
+        # If not, dampen the double (screens/switches invalidate the initial plan).
+        try:
+            spec_primary = str(spec.get("primary_def_pid") or "").strip()
+            cur_primary = str(defender_pid or "").strip()
+            if spec_primary and cur_primary and spec_primary != cur_primary:
+                strength = float(clamp(strength * 0.5, 0.0, 1.0))
+                primary_mismatch = True
+        except Exception:
+            primary_mismatch = False
+
         source = str(spec.get("source") or "CTX") or "CTX"
+        if primary_mismatch:
+            source = f"{source}_PRIMARY_MISMATCH"
         label = str(spec.get("label") or "").strip() or None
 
         if consume:
@@ -484,7 +525,16 @@ def build_resolve_context(
         try:
             resolved = _resolve_double_from_ctx(consume=True)
             if resolved is None:
-                resolved = _resolve_double_from_rules()
+                # If priors already evaluated a double plan this step (def_pressure flag),
+                # do NOT re-evaluate DOUBLE_RULES here (keeps priors/resolve consistent).
+                plan_eval = False
+                try:
+                    dp = ctx.get("def_pressure") if isinstance(ctx.get("def_pressure"), dict) else {}
+                    plan_eval = (dp.get("double_plan_evaluated") is True)
+                except Exception:
+                    plan_eval = False
+                if not plan_eval:
+                    resolved = _resolve_double_from_rules()
             if resolved is not None:
                 ds, dp, src, lbl = resolved
                 double_strength = float(clamp(ds, 0.0, 1.0))
