@@ -3,8 +3,8 @@ from __future__ import annotations
 import random
 from typing import Dict, List, Optional
 
-from .core import weighted_choice
-from .models import Player, TeamState
+from ..core import weighted_choice
+from ..models import Player, TeamState
 
 from .participants_common import _active, _clamp
 
