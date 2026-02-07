@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-from .models import Player
-from .participants import choose_default_actor, choose_stealer_pid
-from .def_role_players import get_or_build_def_role_players, engine_get_stat
-from .prob import _team_variance_mult, prob_from_scores
-from .core import clamp
-from . import quality, matchups
+from ..models import Player
+from ..participants import choose_default_actor, choose_stealer_pid
+from ..def_role_players import get_or_build_def_role_players, engine_get_stat
+from ..prob import _team_variance_mult, prob_from_scores
+from ..core import clamp
+from .. import quality, matchups
 from .resolve_context import ResolveContext
 from .resolve_pass_tracking import clear_pass_tracking
 
