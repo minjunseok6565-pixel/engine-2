@@ -277,6 +277,11 @@ class TeamState:
                 return p
         return None
 
+    def get_player(self, pid: str) -> Optional[Player]:
+        """Backward-compatible alias for find_player()."""
+        return self.find_player(pid)
+
+
     def set_on_court(self, pids: List[str], strict: bool = False) -> None:
         roster_pids = [p.pid for p in self.lineup]
         roster_set = set(roster_pids)
