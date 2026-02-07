@@ -16,13 +16,13 @@ from .models import Player, TeamState
 
 # NOTE: Implementation split across participants_*.py modules; this file re-exports the original API.
 
-from . import participants_roles as _participants_roles
-from . import participants_common as _participants_common
-from . import participants_offense as _participants_offense
-from . import participants_passing as _participants_passing
-from . import participants_rebounds as _participants_rebounds
-from . import participants_defense_events as _participants_defense_events
-from . import participants_fouls as _participants_fouls
+from .participants_parts import participants_roles as _participants_roles
+from .participants_parts import participants_common as _participants_common
+from .participants_parts import participants_offense as _participants_offense
+from .participants_parts import participants_passing as _participants_passing
+from .participants_parts import participants_rebounds as _participants_rebounds
+from .participants_parts import participants_defense_events as _participants_defense_events
+from .participants_parts import participants_fouls as _participants_fouls
 
 for _m in (
     _participants_roles,
