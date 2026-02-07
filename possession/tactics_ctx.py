@@ -10,7 +10,20 @@ import random
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .. import matchups
+from ..participants import choose_default_actor
+from ..tactics import canonical_defense_scheme
 from ..models import GameState, TeamState
+
+
+_SCHEME_HELP_BASELINE = {
+    "PackLine_GapHelp": 0.65,
+    "Zone": 0.45,
+    "Blitz_TrapPnR": 0.55,
+    "Hedge_ShowRecover": 0.30,
+    "Drop": 0.20,
+    "ICE_SidePnR": 0.15,
+    "Switch_Everything": -0.25,
+}
 
 
 def make_possession_tactics_ctx(
@@ -35,7 +48,7 @@ def make_possession_tactics_ctx(
     """Return possession-scoped tactical helpers.
 
     Returns:
-        (_ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force)
+        (_ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force, _update_def_pressure_for_step)
     """
     # Bind helper names used by the extracted code (preserve original variable names).
     _player_stat = player_stat
@@ -333,7 +346,8 @@ def make_possession_tactics_ctx(
           HELP_LEVEL_BY_PID: {pid: "WEAK"/"NORMAL"/"STRONG"} or {pid: -1/0/+1}
         Output (ctx):
           help_level_by_pid: {pid: -1/0/+1}
-          team_help_level: float in [-1, +1]
+          team_help_delta: float in [-1, +1]
+          team_help_level: float in [-1, +1]  (backward-compat alias for team_help_delta)
         """
         try:
             dctx = getattr(getattr(defense, "tactics", None), "context", None)
@@ -363,6 +377,7 @@ def make_possession_tactics_ctx(
         on_def = defense.on_court_players()
         if not on_def:
             ctx["help_level_by_pid"] = lvl
+            ctx["team_help_delta"] = 0.0
             ctx["team_help_level"] = 0.0
             return
 
@@ -377,7 +392,122 @@ def make_possession_tactics_ctx(
             den += w
         team_h = (num / den) if den > 0 else 0.0
         ctx["help_level_by_pid"] = lvl
-        ctx["team_help_level"] = clamp(team_h, -1.0, 1.0)
+        ctx["team_help_delta"] = clamp(team_h, -1.0, 1.0)
+        # Backward-compat alias (older code reads team_help_level).
+        ctx["team_help_level"] = ctx["team_help_delta"]
+
+    # --- Help / Double pressure helpers (possession-scoped) ---
+    def _scheme_help_baseline() -> float:
+        try:
+            ds = canonical_defense_scheme(getattr(defense.tactics, "defense_scheme", ""))
+        except Exception:
+            ds = ""
+        return float(_SCHEME_HELP_BASELINE.get(ds, 0.0))
+
+    def _leave_cost(off_pid: str) -> float:
+        """Return a compact 'leave cost' (0..100) for helping off an offensive player."""
+        if not off_pid:
+            return 50.0
+        op = offense.find_player(off_pid)
+        if op is None:
+            return 50.0
+        c3 = float(_player_stat(op, "SHOT_3_CS", 50.0))
+        o3 = float(_player_stat(op, "SHOT_3_OD", 50.0))
+        return float(clamp(0.70 * c3 + 0.30 * o3, 0.0, 100.0))
+
+    def _leave_cost_norm(cost: float) -> float:
+        # Normalize around 50 to [-1, +1].
+        return float(clamp((float(cost) - 50.0) / 50.0, -1.0, 1.0))
+
+    def _predicted_actor_pid() -> Optional[str]:
+        """Best-effort actor guess for pre-prior tactical evaluation."""
+        fp = str(ctx.get("force_actor_pid") or "").strip()
+        if fp and offense.is_on_court(fp):
+            return fp
+        try:
+            a = choose_default_actor(offense)
+            pid = str(getattr(a, "pid", "") or "").strip()
+            return pid or None
+        except Exception:
+            return None
+
+    def _choose_helper_pid(target_off_pid: Optional[str]) -> Optional[str]:
+        """Choose a weak-side helper using DEF_HELP, stance, and leave-cost."""
+        lvl = ctx.get("help_level_by_pid") if isinstance(ctx.get("help_level_by_pid"), dict) else {}
+        m_map = ctx.get("matchups_map") if isinstance(ctx.get("matchups_map"), dict) else {}
+        m_rev = ctx.get("matchups_rev") if isinstance(ctx.get("matchups_rev"), dict) else {}
+
+        primary = str(m_map.get(str(target_off_pid or ""), "") or "").strip() if target_off_pid else ""
+        best_pid = None
+        best_score = float("-inf")
+
+        for dp in defense.on_court_players():
+            dpid = str(getattr(dp, "pid", "") or "").strip()
+            if not dpid or (primary and dpid == primary):
+                continue
+
+            leave_off = str(m_rev.get(dpid, "") or "").strip()
+            cost = _leave_cost(leave_off)
+            stance = float(clamp(float(lvl.get(dpid, 0.0)), -1.0, 1.0)) * 12.0
+            d_help = float(_player_stat(dp, "DEF_HELP", 50.0))
+
+            score = 0.90 * d_help + stance - 1.00 * cost
+            if score > best_score + 1e-9:
+                best_score = score
+                best_pid = dpid
+
+        return best_pid
+
+    def _choose_doubler_pid(
+        target_off_pid: Optional[str],
+        prefer_tag: Optional[str] = None,
+        *,
+        exclude: Optional[set] = None,
+    ) -> Optional[str]:
+        """Choose a doubler using steal/help/role skill and leave-cost."""
+        m_map = ctx.get("matchups_map") if isinstance(ctx.get("matchups_map"), dict) else {}
+        m_rev = ctx.get("matchups_rev") if isinstance(ctx.get("matchups_rev"), dict) else {}
+
+        primary = str(m_map.get(str(target_off_pid or ""), "") or "").strip() if target_off_pid else ""
+        tag = str(prefer_tag or "").strip().upper()
+        ex = set(exclude or set())
+        if primary:
+            ex.add(primary)
+
+        if tag == "BEST_HELP":
+            w_steal, w_help, w_poa, w_post, w_leave = 0.3, 1.0, 0.0, 0.0, 1.10
+        elif tag == "BEST_POA":
+            w_steal, w_help, w_poa, w_post, w_leave = 0.3, 0.4, 0.8, 0.0, 1.10
+        elif tag == "BEST_POST":
+            w_steal, w_help, w_poa, w_post, w_leave = 0.3, 0.4, 0.0, 0.8, 1.10
+        else:  # BEST_STEAL(default)
+            w_steal, w_help, w_poa, w_post, w_leave = 0.8, 0.5, 0.0, 0.0, 1.10
+
+        best_pid = None
+        best_score = float("-inf")
+
+        for dp in defense.on_court_players():
+            dpid = str(getattr(dp, "pid", "") or "").strip()
+            if not dpid or dpid in ex:
+                continue
+
+            leave_off = str(m_rev.get(dpid, "") or "").strip()
+            cost = _leave_cost(leave_off)
+
+            stl = float(_player_stat(dp, "DEF_STEAL", 50.0))
+            hlp = float(_player_stat(dp, "DEF_HELP", 50.0))
+            poa = float(_player_stat(dp, "DEF_POA", 50.0))
+            pst = float(_player_stat(dp, "DEF_POST", 50.0))
+            rim = float(_player_stat(dp, "DEF_RIM", 50.0))
+
+            anchor_pen = 10.0 if rim >= 65.0 else 0.0
+
+            score = (w_steal * stl) + (w_help * hlp) + (w_poa * poa) + (w_post * pst) - (w_leave * cost) - anchor_pen
+            if score > best_score + 1e-9:
+                best_score = score
+                best_pid = dpid
+
+        return best_pid
 
     # --- Hunting plans (possession start) ---
     def _choose_def_by_tag(tag: str, *, exclude: Optional[set] = None) -> Optional[str]:
@@ -618,7 +748,7 @@ def make_possession_tactics_ctx(
                     doubler_pid = trap_dpid
                 else:
                     tag = str(resp_cfg.get("trap_doubler_tag", "BEST_STEAL") or "BEST_STEAL").strip().upper()
-                    doubler_pid = _choose_def_by_tag(tag, exclude={target_def_pid})
+                    doubler_pid = _choose_doubler_pid(actor_pid, prefer_tag=tag, exclude={target_def_pid})
                 if doubler_pid:
                     ctx["double_active"] = {
                         "off_pid": actor_pid,
@@ -670,4 +800,234 @@ def make_possession_tactics_ctx(
             return
 
 
-    return _ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force
+    # --- Per-step defensive pressure context (help/double for priors + resolve) ---
+    def _update_def_pressure_for_step(action: str, base_action: str, tags: Dict[str, Any]) -> None:
+        """Update ctx['def_pressure'] for the current possession step.
+
+        - Computes help pressure as: scheme baseline + team delta (scaled by scheme).
+        - Chooses a helper and tracks who is being left (rotation risk).
+        - Evaluates DOUBLE_RULES ahead of priors (so doubles affect outcome choice).
+        """
+        # Ensure matchup maps exist.
+        try:
+            _ensure_matchups(reason="step")
+        except Exception:
+            pass
+
+        baseline = float(_scheme_help_baseline())
+        try:
+            delta = float(ctx.get("team_help_delta", 0.0) or 0.0)
+        except Exception:
+            delta = 0.0
+        delta = float(clamp(delta, -1.0, 1.0))
+
+        # If scheme is already very "help-heavy" (or very switchy), reduce the impact of the delta.
+        delta_scale = float(clamp(1.0 - 0.65 * abs(baseline), 0.35, 1.0))
+
+        # Priors use only delta (avoid double-counting scheme multipliers), resolve uses baseline+delta.
+        eff_priors = float(clamp(delta * delta_scale, -1.0, 1.0))
+        eff_resolve = float(clamp(baseline + (delta * delta_scale), -1.0, 1.0))
+
+        # Choose helper and compute leave cost.
+        target_off_pid = _predicted_actor_pid()
+        helper_pid = _choose_helper_pid(target_off_pid)
+        m_rev = ctx.get("matchups_rev") if isinstance(ctx.get("matchups_rev"), dict) else {}
+        leave_off_pid = str(m_rev.get(helper_pid, "") or "").strip() if helper_pid else ""
+        h_leave_cost = _leave_cost(leave_off_pid)
+        h_leave_cost_norm = _leave_cost_norm(h_leave_cost)
+
+        # Seed base def_pressure.
+        ctx["def_pressure"] = {
+            "step_base_action": str(base_action or ""),
+            "help": {
+                "baseline": float(baseline),
+                "delta": float(delta),
+                "delta_scale": float(delta_scale),
+                "eff_priors": float(eff_priors),
+                "eff_resolve": float(eff_resolve),
+                "helper_pid": (helper_pid if helper_pid else None),
+                "leave_off_pid": (leave_off_pid if leave_off_pid else None),
+                "leave_cost": float(h_leave_cost),
+                "leave_cost_norm": float(h_leave_cost_norm),
+            },
+            "double_plan_evaluated": True,
+        }
+
+        # If a double is already active (e.g., HUNT_TRAP), keep it; otherwise evaluate DOUBLE_RULES.
+        double_spec = ctx.get("double_active")
+        if not isinstance(double_spec, dict):
+            # Evaluate rules with a pre-prior actor guess.
+            try:
+                dctx = getattr(getattr(defense, "tactics", None), "context", None)
+            except Exception:
+                dctx = None
+            rules_list = dctx.get("DOUBLE_RULES") if isinstance(dctx, dict) else None
+
+            if isinstance(rules_list, list) and rules_list:
+                # Helper: compute best threat pid once if needed.
+                best_threat_pid = None
+
+                def _best_threat_pid() -> Optional[str]:
+                    nonlocal best_threat_pid
+                    if best_threat_pid is not None:
+                        return best_threat_pid
+                    best_pid = None
+                    best_val = float("-inf")
+                    for op in offense.on_court_players():
+                        try:
+                            v = float(matchups._threat_score(op))
+                        except Exception:
+                            v = 50.0
+                        pid = str(getattr(op, "pid", "") or "").strip()
+                        if pid and v > best_val + 1e-9:
+                            best_val = v
+                            best_pid = pid
+                    best_threat_pid = best_pid
+                    return best_threat_pid
+
+                actor_pid = target_off_pid
+
+                for rule in rules_list:
+                    if not isinstance(rule, dict):
+                        continue
+
+                    # Base-action gating.
+                    wba = rule.get("when_base_actions")
+                    if isinstance(wba, list) and wba:
+                        if str(base_action or "") not in set(str(x) for x in wba if str(x)):
+                            continue
+
+                    target = rule.get("target")
+                    if not isinstance(target, Mapping):
+                        target = rule
+
+                    off_pid = str(target.get("off_pid") or "").strip()
+                    off_role = str(target.get("off_role") or "").strip()
+                    tag = str(target.get("tag") or "").strip().upper()
+
+                    matched = False
+                    if actor_pid:
+                        if off_pid and off_pid == actor_pid:
+                            matched = True
+                        elif off_role:
+                            try:
+                                roles = getattr(offense, "roles", None)
+                                if isinstance(roles, Mapping):
+                                    rp = str(roles.get(off_role) or "").strip()
+                                    if rp and rp == actor_pid:
+                                        matched = True
+                            except Exception:
+                                matched = False
+                        elif tag == "BEST_THREAT":
+                            bt = _best_threat_pid()
+                            if bt and bt == actor_pid:
+                                matched = True
+
+                    if not matched:
+                        continue
+
+                    try:
+                        strength = float(rule.get("strength", 0.65) or 0.65)
+                    except Exception:
+                        strength = 0.65
+                    strength = float(clamp(strength, 0.0, 1.0))
+                    if strength <= 1e-9:
+                        continue
+
+                    try:
+                        freq = float(rule.get("frequency", 1.0) or 1.0)
+                    except Exception:
+                        freq = 1.0
+                    freq = float(clamp(freq, 0.0, 1.0))
+
+                    # Roll.
+                    p = float(clamp(freq * strength, 0.0, 1.0))
+                    try:
+                        if float(getattr(game_state, "shot_clock_sec", 24.0) or 24.0) <= 8.0:
+                            p = float(clamp(p + 0.12, 0.0, 1.0))
+                    except Exception:
+                        pass
+                    if bool(tags.get("in_transition", False)):
+                        p = float(clamp(p - 0.12, 0.0, 1.0))
+
+                    if p < 1.0 and rng.random() > p:
+                        continue
+
+                    # Choose doubler.
+                    doubler_pid = str(rule.get("doubler_pid") or "").strip()
+                    if doubler_pid and not defense.is_on_court(doubler_pid):
+                        doubler_pid = ""
+
+                    if not doubler_pid:
+                        prefer = str(rule.get("doubler_tag", "BEST_STEAL") or "BEST_STEAL").strip().upper()
+                        doubler_pid = _choose_doubler_pid(actor_pid, prefer_tag=prefer)
+
+                    # Primary defender (best-effort, from current map).
+                    m_map = ctx.get("matchups_map") if isinstance(ctx.get("matchups_map"), dict) else {}
+                    primary_def_pid = str(m_map.get(actor_pid or "", "") or "").strip() if actor_pid else ""
+
+                    label = str(rule.get("label") or "").strip() or None
+
+                    ctx["double_active"] = {
+                        "off_pid": actor_pid,
+                        "primary_def_pid": (primary_def_pid if primary_def_pid else None),
+                        "doubler_pid": (doubler_pid if doubler_pid else None),
+                        "strength": float(strength),
+                        "ttl": 2,
+                        "source": "RULE",
+                        "label": label,
+                    }
+                    break  # One rule per step.
+
+        # Populate def_pressure.double from ctx.double_active (or inactive).
+        spec = ctx.get("double_active")
+        active = False
+        off_pid = None
+        primary_def_pid = None
+        doubler_pid = None
+        strength = 0.0
+        source = None
+        label = None
+
+        if isinstance(spec, dict):
+            try:
+                ttl = int(spec.get("ttl", 0) or 0)
+            except Exception:
+                ttl = 0
+            off = str(spec.get("off_pid") or "").strip()
+            if ttl > 0 and off and offense.is_on_court(off):
+                active = True
+                off_pid = off
+                primary_def_pid = str(spec.get("primary_def_pid") or "").strip() or None
+                doubler_pid = str(spec.get("doubler_pid") or "").strip() or None
+                try:
+                    strength = float(spec.get("strength", 0.0) or 0.0)
+                except Exception:
+                    strength = 0.0
+                strength = float(clamp(strength, 0.0, 1.0))
+                source = str(spec.get("source") or "").strip() or None
+                label = str(spec.get("label") or "").strip() or None
+
+        d_leave_off = ""
+        d_leave_cost = 50.0
+        d_leave_cost_norm = 0.0
+        if active and doubler_pid:
+            m_rev = ctx.get("matchups_rev") if isinstance(ctx.get("matchups_rev"), dict) else {}
+            d_leave_off = str(m_rev.get(doubler_pid, "") or "").strip()
+            d_leave_cost = _leave_cost(d_leave_off)
+            d_leave_cost_norm = _leave_cost_norm(d_leave_cost)
+
+        ctx["def_pressure"]["double"] = {
+            "active": bool(active),
+            "off_pid": off_pid,
+            "primary_def_pid": primary_def_pid,
+            "doubler_pid": doubler_pid,
+            "strength": float(strength),
+            "leave_off_pid": (d_leave_off if d_leave_off else None),
+            "leave_cost": float(d_leave_cost),
+            "leave_cost_norm": float(d_leave_cost_norm),
+            "source": source,
+            "label": label,
+        }
+
+    return _ensure_matchups, _cache_help_levels, _maybe_apply_hunt_plan, _maybe_inject_matchup_force, _update_def_pressure_for_step
