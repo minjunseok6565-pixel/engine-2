@@ -4,14 +4,14 @@ import math
 from collections.abc import Mapping
 from typing import Any, Dict, Tuple
 
-from .core import clamp, dot_profile, sigmoid
-from .def_role_players import get_or_build_def_role_players, engine_get_stat
-from .profiles import OUTCOME_PROFILES
-from .prob import _team_variance_mult, prob_from_scores
-from . import quality
+from ..core import clamp, dot_profile, sigmoid
+from ..def_role_players import get_or_build_def_role_players, engine_get_stat
+from ..profiles import OUTCOME_PROFILES
+from ..prob import _team_variance_mult, prob_from_scores
+from .. import quality
 from .resolve_context import ResolveContext, _knob_mult
 from .resolve_pass_tracking import clear_pass_tracking
-from .participants import choose_stealer_pid  # used in steal split
+from ..participants import choose_stealer_pid  # used in steal split
 
 def handle_pass(
     rc: ResolveContext,
