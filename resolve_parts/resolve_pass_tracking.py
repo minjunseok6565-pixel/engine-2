@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .models import GameState, TeamState
+from ..models import GameState, TeamState
 
 _ASSIST_WINDOW_SEC = {
     "SHOT_3_CS": 2.00,
