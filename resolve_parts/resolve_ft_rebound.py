@@ -4,18 +4,18 @@ import random
 from collections.abc import Mapping
 from typing import Any, Dict, TYPE_CHECKING
 
-from .core import clamp
-from .era import DEFAULT_PROB_MODEL
-from .models import Player, TeamState
-from .participants import (
+from ..core import clamp
+from ..era import DEFAULT_PROB_MODEL
+from ..models import Player, TeamState
+from ..participants import (
     choose_orb_rebounder as _choose_orb_rebounder,
     choose_drb_rebounder as _choose_drb_rebounder,
 )
-from .prob import prob_from_scores
+from ..prob import prob_from_scores
 from .resolve_context import _knob_mult
 
 if TYPE_CHECKING:
-    from .game_config import GameConfig
+    from ..game_config import GameConfig
 
 def resolve_free_throws(
     rng: random.Random,
