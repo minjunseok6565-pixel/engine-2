@@ -3,11 +3,11 @@ from __future__ import annotations
 import random
 from typing import Optional, TYPE_CHECKING
 
-from .builders import get_action_base
-from .profiles import CORNER3_PROB_BY_ACTION_BASE
+from ..builders import get_action_base
+from ..profiles import CORNER3_PROB_BY_ACTION_BASE
 
 if TYPE_CHECKING:
-    from .game_config import GameConfig
+    from ..game_config import GameConfig
 
 def shot_zone_from_outcome(outcome: str) -> Optional[str]:
     if outcome in ("SHOT_RIM_LAYUP", "SHOT_RIM_DUNK", "SHOT_RIM_CONTACT", "SHOT_TOUCH_FLOATER"):
