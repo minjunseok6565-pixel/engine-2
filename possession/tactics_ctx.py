@@ -74,7 +74,10 @@ def make_possession_tactics_ctx(
 
         # --- LOCKS ---
         locks_pairs: List[Tuple[str, str]] = []
-        raw_locks = dctx.get("MATCHUP_LOCKS", dctx.get("MATCHUP_LOCK"))
+        raw_locks = dctx.get("MATCHUP_LOCKS")
+        if raw_locks is None:
+            # Match matchups._extract_locks: fallback only when the primary key is present but None.
+            raw_locks = dctx.get("MATCHUP_LOCK")
         if isinstance(raw_locks, list):
             for item in raw_locks:
                 if not isinstance(item, dict):
@@ -99,9 +102,13 @@ def make_possession_tactics_ctx(
 
         # --- HIDES ---
         hides: List[str] = []
-        raw_hides = dctx.get("MATCHUP_HIDE_PIDS", dctx.get("MATCHUP_HIDE_PID"))
-        if isinstance(raw_hides, list):
-            hides = [str(x).strip() for x in raw_hides if str(x).strip()]
+        raw_hides = dctx.get("MATCHUP_HIDE_PIDS")
+        if raw_hides is None:
+            # Match matchups._extract_hides: fallback only when the primary key is present but None.
+            raw_hides = dctx.get("MATCHUP_HIDE_PID")
+        if isinstance(raw_hides, (list, tuple)):
+            # Match matchups._extract_hides: treat None as empty so it doesn't become the string "None".
+            hides = [str(x).strip() for x in raw_hides if str(x or "").strip()]
         else:
             s = str(raw_hides or "").strip()
             hides = [s] if s else []
