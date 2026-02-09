@@ -234,12 +234,6 @@ def maybe_timeout_deadball(
         last_scoring_team_id=getattr(game_state, "last_scoring_team_id", None),
     )
 
-    # Recovery (optional; default disabled)
-    rec = rules.get("timeout_recovery", {})
-    if isinstance(rec, dict) and bool(rec.get("enabled", False)):
-        # v1: implement later if desired (kept as hook; no-op here by default)
-        pass
-
     return event
 
 
