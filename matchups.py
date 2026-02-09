@@ -337,7 +337,7 @@ def _extract_hides(defense: TeamState) -> List[str]:
         return []
 
     if isinstance(raw, (list, tuple)):
-        return [str(x) for x in raw if str(x or "").strip()]
+        return [str(x).strip() for x in raw if str(x or "").strip()]
 
     s = str(raw or "").strip()
     return [s] if s else []
