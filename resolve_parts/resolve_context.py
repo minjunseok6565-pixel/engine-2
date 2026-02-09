@@ -388,13 +388,43 @@ def build_resolve_context(
         if not isinstance(spec, dict):
             return None
         off_pid = str(spec.get("off_pid") or "").strip()
-        if not off_pid or off_pid != actor.pid:
-            return None
         try:
             ttl = int(spec.get("ttl", 1) or 1)
         except Exception:
             ttl = 1
         if ttl <= 0:
+            # Clean up invalid spec to avoid lingering states.
+            try:
+                ctx.pop("double_active", None)
+            except Exception:
+                pass
+            return None
+        # If the target is not on the floor anymore, drop the spec.
+        if not off_pid or (not offense.is_on_court(off_pid)):
+            try:
+                ctx.pop("double_active", None)
+            except Exception:
+                pass
+            return None
+
+        # IMPORTANT (ghost-double fix):
+        # Even if the planned double does not apply to the current outcome actor, a "step" has passed.
+        # Consume TTL so a pre-prior double plan doesn't keep biasing priors across multiple steps.
+        if consume:
+            try:
+                ttl2 = ttl - 1
+                if ttl2 <= 0:
+                    ctx.pop("double_active", None)
+                else:
+                    spec["ttl"] = ttl2
+            except Exception:
+                try:
+                    ctx.pop("double_active", None)
+                except Exception:
+                    pass
+
+        # Apply the double only when it targets this outcome's actor (on-ball assumption).
+        if off_pid != actor.pid:
             return None
 
         try:
@@ -432,15 +462,6 @@ def build_resolve_context(
             source = f"{source}_PRIMARY_MISMATCH"
         label = str(spec.get("label") or "").strip() or None
 
-        if consume:
-            try:
-                ttl2 = ttl - 1
-                if ttl2 <= 0:
-                    ctx.pop("double_active", None)
-                else:
-                    spec["ttl"] = ttl2
-            except Exception:
-                ctx.pop("double_active", None)
 
         if strength <= 1e-9:
             return None
@@ -526,14 +547,37 @@ def build_resolve_context(
             resolved = _resolve_double_from_ctx(consume=True)
             if resolved is None:
                 # If priors already evaluated a double plan this step (def_pressure flag),
-                # do NOT re-evaluate DOUBLE_RULES here (keeps priors/resolve consistent).
+                # do NOT re-evaluate DOUBLE_RULES here only when a double was actually planned/active
+                # (keeps priors/resolve consistent). If no planned double was active, allow rules
+                # to fire at resolve-time (restores legacy behavior).
                 plan_eval = False
+                planned_active = False
                 try:
                     dp = ctx.get("def_pressure") if isinstance(ctx.get("def_pressure"), dict) else {}
                     plan_eval = (dp.get("double_plan_evaluated") is True)
+                    dbl = dp.get("double") if isinstance(dp.get("double"), dict) else {}
+                    planned_active = bool(dbl.get("active", False))
                 except Exception:
                     plan_eval = False
-                if not plan_eval:
+                    planned_active = False
+
+                # Legacy/edge safety: if def_pressure is missing but a ctx double spec exists, treat it as planned.
+                if not planned_active:
+                    try:
+                        spec2 = ctx.get("double_active")
+                        if isinstance(spec2, dict):
+                            op2 = str(spec2.get("off_pid") or "").strip()
+                            try:
+                                ttl2 = int(spec2.get("ttl", 0) or 0)
+                            except Exception:
+                                ttl2 = 0
+                            if ttl2 > 0 and op2 and offense.is_on_court(op2):
+                                planned_active = True
+                    except Exception:
+                        planned_active = planned_active
+
+                # Skip rules ONLY when priors had an active planned double.
+                if not (plan_eval and planned_active):
                     resolved = _resolve_double_from_rules()
             if resolved is not None:
                 ds, dp, src, lbl = resolved
