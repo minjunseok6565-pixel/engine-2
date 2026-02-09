@@ -218,7 +218,7 @@ MVP_RULES = {
         "QuickShot": 1.4,
         "Putback": 0.95,
         "Cut": 4.8,
-        "TransitionEarly": 4.4,
+        "TransitionEarly": 5.2,
         "Kickout": 3.2,
         "ExtraPass": 3.5,
         "Reset": 5.3,
@@ -230,8 +230,8 @@ MVP_RULES = {
         "quickshot_cost_sec": 1.2,
         "soft_slack_span": 4.0,
         "soft_slack_floor": 0.20,
-        "quickshot_inject_base": 0.05,
-        "quickshot_inject_urgency_mult": 0.35,
+        "quickshot_inject_base": 0.03,
+        "quickshot_inject_urgency_mult": 0.25,
         "pass_reset_suppress_urgency": 0.85
     },
 
